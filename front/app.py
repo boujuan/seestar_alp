@@ -1398,8 +1398,15 @@ def do_goto_target(req, resp, telescope_id):
     ra = form["ra"]
     dec = form["dec"]
     useJ2000 = form.get("useJ2000") == "on"
+    bypassSun = form.get("bypassSunSafety") == "on"
     errors = {}
-    values = {"target_name": targetName, "is_j2000": useJ2000, "ra": ra, "dec": dec}
+    values = {
+        "target_name": targetName,
+        "is_j2000": useJ2000,
+        "ra": ra,
+        "dec": dec,
+        "bypass_sun_safety": bypassSun,
+    }
 
     if not check_ra_value(ra):
         flash(resp, "Invalid RA value")
@@ -1415,6 +1422,13 @@ def do_goto_target(req, resp, telescope_id):
 
     response = do_action_device("goto_target", telescope_id, values)
     logger.info("POST immediate request %s %s", values, response)
+
+    # Detect the structured pre-flight refusal and surface it to the
+    # template so the confirm-modal partial can render it.
+    inner = response.get("Value") if isinstance(response, dict) else None
+    if isinstance(inner, dict) and inner.get("reason") == "sun_safety_confirmation_required":
+        values["sun_safety_confirm"] = inner.get("guard") or {}
+        flash(resp, "Sun safety: confirm to proceed (filter required).")
 
     return values, errors
 
@@ -3245,6 +3259,51 @@ class LiveModeResource:
         resp.status = falcon.HTTP_200
         resp.content_type = "text/plain"
         resp.text = mode
+
+
+# ---------- Sun-safety pre-flight: status + runtime toggle ----------
+
+
+def _sun_safety_payload():
+    """Lightweight status used by the toggle pill and (optionally) UI checks."""
+    from device.sun_safety import (
+        DEFAULT_MIN_SEPARATION_DEG,
+        is_pre_flight_enabled,
+    )
+
+    return {
+        "enabled": bool(is_pre_flight_enabled()),
+        "min_separation_deg": DEFAULT_MIN_SEPARATION_DEG,
+    }
+
+
+class SunSafetyStatusResource:
+    """GET endpoint polled by the persistent toggle pill."""
+
+    @staticmethod
+    def on_get(req, resp):
+        resp.status = falcon.HTTP_200
+        resp.content_type = "application/json"
+        resp.text = json.dumps(_sun_safety_payload())
+
+
+class SunSafetyToggleResource:
+    """POST {enabled: bool} — runtime-toggles the pre-flight check."""
+
+    @staticmethod
+    def on_post(req, resp):
+        from device.sun_safety import set_pre_flight_enabled
+
+        try:
+            body = req.media if req.content_length else {}
+        except Exception:
+            body = {}
+        enabled = bool(body.get("enabled", True))
+        set_pre_flight_enabled(enabled)
+        logger.info("sun_safety pre-flight enabled=%s (runtime toggle)", enabled)
+        resp.status = falcon.HTTP_200
+        resp.content_type = "application/json"
+        resp.text = json.dumps(_sun_safety_payload())
 
 
 class LiveGotoResource(BaseResource):
@@ -5125,6 +5184,9 @@ class FrontMain:
         app.add_route("/reload", ReloadResource())
         app.add_route("/{telescope_id:int}/", HomeTelescopeResource())
         app.add_route("/{telescope_id:int}/goto", GotoResource())
+        # ---- Sun-safety pre-flight (global; not per-telescope) ----
+        app.add_route("/api/sun_safety/status", SunSafetyStatusResource())
+        app.add_route("/api/sun_safety/toggle", SunSafetyToggleResource())
         app.add_route("/{telescope_id:int}/command", CommandResource())
         app.add_route("/{telescope_id:int}/console", ConsoleResource())
         app.add_route("/{telescope_id:int}/image", ImageResource())

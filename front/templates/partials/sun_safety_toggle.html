@@ -1,0 +1,71 @@
+<!-- Persistent bottom-right toggle pill for the sun-safety pre-flight
+     check. Green padlock = ON (default, safe), red sun = OFF (operator
+     has acknowledged the solar filter is physically installed).
+
+     Polls /api/sun_safety/status every 10 s to stay coherent with other
+     tabs. Disable shows a confirm() requiring explicit acknowledgement
+     of the filter, since unfiltered sun on the IMX585 destroys it. -->
+<div id="sun-safety-toggle"
+     style="display:none; position:fixed; right:14px; bottom:14px;
+            z-index:1900; padding:6px 12px; border-radius:9999px;
+            font-weight:700; font-size:0.85rem; cursor:pointer;
+            box-shadow:0 2px 8px rgba(0,0,0,0.35); user-select:none;">
+</div>
+
+<script>
+(function () {
+  function render(data) {
+    var el = document.getElementById("sun-safety-toggle");
+    if (!el) return;
+    el.style.display = "block";
+    if (data.enabled) {
+      el.style.background = "#15803d";
+      el.style.color = "#fff";
+      el.textContent = "Sun safety: ON";
+      el.title = "Click to DISABLE (filter required)";
+    } else {
+      el.style.background = "#b91c1c";
+      el.style.color = "#fff";
+      el.textContent = "Sun safety: OFF (filter)";
+      el.title = "Click to re-enable";
+    }
+  }
+
+  function fetchStatus() {
+    fetch("/api/sun_safety/status")
+      .then(function (r) { return r.json(); })
+      .then(render)
+      .catch(function () { /* try again on next poll */ });
+  }
+
+  function toggle() {
+    var el = document.getElementById("sun-safety-toggle");
+    var currentlyOn = el && el.textContent.indexOf("ON") !== -1;
+    if (currentlyOn) {
+      var ok = confirm(
+        "Disable sun-safety pre-flight?\n\n" +
+        "ONLY click OK if the official magnetic ND solar filter is " +
+        "PHYSICALLY INSTALLED on the front of the OTA. Unfiltered sun on " +
+        "the IMX585 sensor destroys it within seconds."
+      );
+      if (!ok) return;
+    }
+    fetch("/api/sun_safety/toggle", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({enabled: !currentlyOn}),
+    })
+      .then(function (r) { return r.json(); })
+      .then(render)
+      .catch(function () { /* leave UI as-is */ });
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    var el = document.getElementById("sun-safety-toggle");
+    if (!el) return;
+    el.addEventListener("click", toggle);
+    fetchStatus();
+    setInterval(fetchStatus, 10000);
+  });
+})();
+</script>
