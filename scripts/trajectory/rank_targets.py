@@ -113,7 +113,11 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
         traj, az_limits=az_limits, mount_frame=mount_frame,
     )
     header = provider.header
-    peak_el_deg = float(header.get("peak_el_deg", pre.max_el_deg))
+    # Use the freshly-computed peak_el from pre_check (which used the
+    # current MountFrame's site). Trusting header.peak_el_deg would
+    # give the LA-frame value if the file was written before the site
+    # fix — leading to a UI mismatch with peak_v_az (which IS recomputed).
+    peak_el_deg = float(pre.max_el_deg)
     name = header.get("name") or header.get("callsign") or header.get("id") or path.stem
     duration_s = float(header.get("duration_s", 0.0))
 

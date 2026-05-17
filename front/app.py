@@ -4379,14 +4379,20 @@ def _satellites_refresh_worker(hours: float, top_n: int) -> None:
 
     try:
         _SATELLITES_DIR.mkdir(parents=True, exist_ok=True)
-        # Prune stale files first (passes whose end_unix is in the past)
+        # Prune stale files: (a) past end_unix, (b) wrong-site header
+        # (header observer doesn't match Config — happens when the
+        # service was started with different env vars than Config).
         now = time.time()
+        try:
+            from device.config import Config as _Cfg
+            cfg_lat = float(_Cfg.init_lat)
+            cfg_lon = float(_Cfg.init_long)
+        except Exception:
+            cfg_lat = cfg_lon = None
         for p in _SATELLITES_DIR.glob("*.jsonl"):
             try:
                 with p.open("r", encoding="utf-8") as f:
                     hdr = json.loads(f.readline())
-                # header has 'duration_s' but not start_unix; encode it in filename
-                # _<unix>.jsonl
                 stem = p.stem
                 ts_str = stem.rsplit("_", 1)[-1]
                 start_unix = float(ts_str) if ts_str.isdigit() else 0
@@ -4394,6 +4400,19 @@ def _satellites_refresh_worker(hours: float, top_n: int) -> None:
                 if end_unix and end_unix < now:
                     p.unlink()
                     logger.info("satellites refresh: pruned stale %s", p.name)
+                    continue
+                # Wrong-site check (tolerance 0.01° = ~1 km)
+                if cfg_lat is not None:
+                    obs_lat = float(hdr.get("observer_lat", 0) or 0)
+                    obs_lon = float(hdr.get("observer_lon", 0) or 0)
+                    if (abs(obs_lat - cfg_lat) > 0.01 or
+                            abs(obs_lon - cfg_lon) > 0.01):
+                        p.unlink()
+                        logger.info(
+                            "satellites refresh: pruned wrong-site %s "
+                            "(header lat=%s, expected %s)",
+                            p.name, obs_lat, cfg_lat,
+                        )
             except Exception:
                 logger.debug("could not check %s for staleness", p, exc_info=True)
 
