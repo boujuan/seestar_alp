@@ -100,48 +100,77 @@ def _peak_apparent_magnitude(
     sat_slant_m_grid: np.ndarray,
     std_mag: float,
     eph,
-) -> tuple[float, bool]:
-    """Return (peak_apparent_mag, any_sunlit) over a pass.
+    site=None,
+) -> dict:
+    """Return visibility metrics for a pass.
 
-    Apparent magnitude:
-        m = std_mag + 5*log10(range_km/1000)
-            - 2.5*log10(phase_function)
+    Returns dict with:
+      ``any_sunlit``           — sat reflected sunlight at ANY sample
+      ``peak_apparent_mag``    — brightest mag during sunlit samples (smaller=brighter), None if always shadowed
+      ``peak_visible_mag``     — brightest mag during samples that are BOTH sunlit AND observer sky is dark enough (sun alt < -6°). None if no such sample exists.
+      ``visible_seconds``      — total wall-clock seconds the pass is visible
+      ``sun_alt_min_deg``      — coldest sun altitude at the observer during pass (most useful for "how dark")
 
-    Phase function (diffuse sphere): (1 + cos(phase_angle))/2
-
-    A satellite is "visible" only if it's in sunlight AND the sky is
-    dark enough (sun below ~-6 deg). For shadowed samples the magnitude
-    is reported as +inf (not visible).
+    Visibility model:
+      - Sat must be in sunlight (skyfield is_sunlit).
+      - Sky must be dark enough at the observer (sun alt < -6°, civil twilight).
+      - Visible mag = std + 5·log10(range/1000) − 2.5·log10(phase_func).
+      - phase_func is a diffuse 0.5 fallback (good to ±0.5 mag).
     """
-    # Sunlit check per-tick via skyfield. from_datetime needs a list,
-    # not an ndarray.
+    # Per-tick times for skyfield
     times = ts_scale.from_datetimes([
         datetime.fromtimestamp(float(t), tz=timezone.utc)
         for t in t_grid_unix
     ])
     try:
-        sunlit = sat.at(times).is_sunlit(eph)  # ndarray of bool
+        sunlit = sat.at(times).is_sunlit(eph)
     except Exception:
         sunlit = np.ones(len(t_grid_unix), dtype=bool)
 
-    # Range in km
-    range_km = sat_slant_m_grid / 1000.0
-    # Simple phase model: phase ~ 90 deg when sat is at half-illumination,
-    # cosine factor (1+cos)/2. Without a proper sun vector at the sat,
-    # approximate with the sat's altitude proxy: low alt = larger phase
-    # angle (sat seen edge-on relative to sun). Conservative.
-    # For a better estimate this needs sun_az/alt at the satellite, not
-    # the observer — left for a polish round.
-    phase_func = np.full_like(range_km, 0.5)  # diffuse default
-    # Avoid log of zero
-    phase_func = np.maximum(phase_func, 1e-3)
+    # Sun altitude at observer per tick (for sky-darkness check)
+    sun_alt_obs = np.zeros(len(t_grid_unix))
+    if site is not None:
+        from skyfield.api import wgs84
+        observer = wgs84.latlon(
+            latitude_degrees=site.lat_deg,
+            longitude_degrees=site.lon_deg,
+            elevation_m=site.alt_m,
+        )
+        try:
+            apparent_sun = (eph["earth"] + observer).at(times).observe(eph["sun"]).apparent()
+            alt_sun, _, _ = apparent_sun.altaz()
+            sun_alt_obs = np.asarray(alt_sun.degrees)
+        except Exception:
+            pass
 
+    sky_dark = sun_alt_obs < -6.0  # civil twilight or darker
+
+    # Apparent magnitude per tick
+    range_km = sat_slant_m_grid / 1000.0
+    phase_func = np.maximum(np.full_like(range_km, 0.5), 1e-3)
     apparent = std_mag + 5 * np.log10(range_km / 1000.0) - 2.5 * np.log10(phase_func)
-    # Mask shadowed samples to +inf
-    apparent_visible = np.where(sunlit, apparent, np.inf)
-    if not np.any(np.isfinite(apparent_visible)):
-        return float("inf"), False
-    return float(np.min(apparent_visible)), bool(np.any(sunlit))
+
+    # Mask: bright if sat is sunlit AND sky is dark
+    visible_mask = sunlit & sky_dark
+    sunlit_mask = sunlit
+
+    peak_apparent = (float(np.min(np.where(sunlit_mask, apparent, np.inf)))
+                     if np.any(sunlit_mask) else float("inf"))
+    peak_visible = (float(np.min(np.where(visible_mask, apparent, np.inf)))
+                    if np.any(visible_mask) else float("inf"))
+
+    # tick duration
+    dt = float(t_grid_unix[1] - t_grid_unix[0]) if len(t_grid_unix) > 1 else 0.5
+    visible_seconds = float(np.sum(visible_mask)) * dt
+    sun_alt_min = float(np.min(sun_alt_obs)) if len(sun_alt_obs) else 0.0
+
+    return {
+        "any_sunlit": bool(np.any(sunlit)),
+        "peak_apparent_mag": peak_apparent if np.isfinite(peak_apparent) else None,
+        "peak_visible_mag": peak_visible if np.isfinite(peak_visible) else None,
+        "visible_seconds": visible_seconds,
+        "sun_alt_min_deg": sun_alt_min,
+    }
 
 
 @dataclass
@@ -256,17 +285,22 @@ def export_pass(
     t0 = int(t_grid[0])
     path = out_dir / f"{safe_name}_{p.norad_id}_{t0}.jsonl"
 
-    # Apparent magnitude estimate (peak brightness during the pass)
+    # Apparent magnitude + visibility estimate
     std_mag = _std_mag_for(p.satellite_name)
-    peak_mag = float("inf")
-    any_sunlit = False
+    mag_info = {
+        "any_sunlit": False,
+        "peak_apparent_mag": None,
+        "peak_visible_mag": None,
+        "visible_seconds": 0.0,
+        "sun_alt_min_deg": 0.0,
+    }
     if eph is not None:
         try:
-            peak_mag, any_sunlit = _peak_apparent_magnitude(
+            mag_info = _peak_apparent_magnitude(
                 sat, ts_scale, t_grid,
                 sun_az_deg_grid=None, sun_alt_deg_grid=None,
                 sat_alt_deg_grid=el, sat_slant_m_grid=slant,
-                std_mag=std_mag, eph=eph,
+                std_mag=std_mag, eph=eph, site=site,
             )
         except Exception as exc:
             print(f"[fetch_satellites] mag calc failed for {p.satellite_name}: {exc}",
@@ -289,8 +323,11 @@ def export_pass(
         "sample_rate_hz": sample_hz,
         "n_samples": int(len(t_grid)),
         "std_mag": std_mag,
-        "peak_apparent_mag": peak_mag if np.isfinite(peak_mag) else None,
-        "any_sunlit": any_sunlit,
+        "peak_apparent_mag": mag_info["peak_apparent_mag"],
+        "peak_visible_mag": mag_info["peak_visible_mag"],
+        "any_sunlit": mag_info["any_sunlit"],
+        "visible_seconds": mag_info["visible_seconds"],
+        "sun_alt_min_deg": mag_info["sun_alt_min_deg"],
         "tle": [l1, l2] if l1 else [],
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
@@ -382,17 +419,42 @@ def fetch_and_export(
     print(f"[fetch_satellites] {len(candidates)} candidate passes match filter",
           file=sys.stderr)
 
-    # Rank by culmination elevation descending, dedupe by satellite name.
-    candidates.sort(key=lambda pair: -pair[0].culm_el_deg)
+    # Selection strategy: priority satellites (ISS, Tianhe / Tiangong /
+    # CSS, HST) always get up to MAX_PER_SAT passes; remaining slots
+    # filled chronologically with up to MAX_PER_SAT other passes per
+    # satellite. The old "highest-el dedupe" tended to favor shadowed
+    # midnight passes over visible evening passes for the very objects
+    # the user cares about most.
+    PRIORITY_PREFIXES = ("ISS", "TIANHE", "CSS", "TIANGONG", "HST")
+    MAX_PER_SAT = 3
+
+    priority_candidates = [
+        (p, sat) for p, sat in candidates
+        if any(pre in p.satellite_name.upper() for pre in PRIORITY_PREFIXES)
+    ]
+    other_candidates = [
+        (p, sat) for p, sat in candidates
+        if not any(pre in p.satellite_name.upper() for pre in PRIORITY_PREFIXES)
+    ]
+    priority_candidates.sort(key=lambda pair: pair[0].t_rise_unix)
+    other_candidates.sort(key=lambda pair: pair[0].t_rise_unix)
+
+    per_sat_count: dict[str, int] = {}
     picked: list[tuple[Pass, object]] = []
-    seen_names: set[str] = set()
-    for p, sat in candidates:
-        if p.satellite_name in seen_names:
-            continue
-        seen_names.add(p.satellite_name)
+    # Priority sats: take ALL their candidates (typically 5-8 per 72h),
+    # so the user always sees the next visible Tianhe / ISS pass even
+    # when it falls outside a chronological cutoff.
+    for p, sat in priority_candidates:
+        per_sat_count[p.satellite_name] = per_sat_count.get(p.satellite_name, 0) + 1
         picked.append((p, sat))
+    for p, sat in other_candidates:
         if len(picked) >= top_n:
             break
+        n = per_sat_count.get(p.satellite_name, 0)
+        if n >= MAX_PER_SAT:
+            continue
+        per_sat_count[p.satellite_name] = n + 1
+        picked.append((p, sat))
 
     written: list[Path] = []
     for p, sat in picked:

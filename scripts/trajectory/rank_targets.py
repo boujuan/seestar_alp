@@ -59,6 +59,8 @@ class TargetReport:
     tle_pinned: bool
     notes: list[str]
     peak_apparent_mag: float | None = None  # smaller = brighter; None if in shadow
+    peak_visible_mag: float | None = None   # bright AND sky dark enough; None if not visible
+    visible_seconds: float = 0.0
     any_sunlit: bool = True
 
     def summary(self) -> str:
@@ -95,8 +97,15 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
     el_rms = float(np.sqrt(np.mean(sim.el_err ** 2)))
     el_peak = float(np.max(np.abs(sim.el_err)))
 
-    # Score: feasible weight (largest), then track-error penalty, then
-    # mid-sky bonus (peak_el closest to 60°), then duration bonus.
+    # Visibility metrics from the header (computed at fetch time).
+    peak_mag = header.get("peak_apparent_mag")
+    peak_vis_mag = header.get("peak_visible_mag")
+    visible_seconds = float(header.get("visible_seconds", 0.0))
+    any_sunlit = bool(header.get("any_sunlit", True))
+
+    # Score: feasibility + tracking quality + mid-sky bonus + duration.
+    # Visibility (sat sunlit AND observer sky dark) is the LARGEST
+    # qualitative factor — a shadowed pass is unphotographable.
     if pre.feasible and sim.az_sat_count == 0 and sim.el_sat_count == 0:
         score = 100.0
     else:
@@ -106,10 +115,27 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
     score -= abs(peak_el_deg - 60.0) * 0.2
     score += min(duration_s / 60.0, 10.0) * 1.0
 
-    # Pin Tiangong / CSS passes to the top.
+    # Visibility multiplier — applied BEFORE the pin so shadowed
+    # passes still rank below visible ones even when they are pinned.
+    if peak_vis_mag is None:
+        # Pass is invisible (sat in shadow or sky too bright). Camera
+        # cannot photograph it; tracking is mechanically possible but
+        # useless. Heavy penalty.
+        score *= 0.1
+    else:
+        # Bonus for naked-eye-bright passes.
+        if peak_vis_mag < 2.0:
+            score += 10.0
+        if peak_vis_mag < -1.0:
+            score += 20.0
+
+    # Tiangong / CSS pin — still applies but reduced when shadowed.
     tle_pinned = "TIANHE" in name.upper() or "CSS" in name.upper() or "TIANGONG" in name.upper()
     if tle_pinned:
-        score += 1000.0
+        if peak_vis_mag is None:
+            score += 100.0   # still surface it, but don't dominate the list
+        else:
+            score += 1000.0
 
     notes = list(pre.notes)
     if sim.az_sat_count or sim.el_sat_count:
@@ -118,8 +144,6 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
         )
 
     t_start, t_end = provider.valid_range()
-    peak_mag = header.get("peak_apparent_mag")
-    any_sunlit = bool(header.get("any_sunlit", True))
     return TargetReport(
         path=path, name=str(name),
         start_unix=float(t_start), end_unix=float(t_end),
@@ -139,6 +163,8 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
         tle_pinned=tle_pinned,
         notes=notes,
         peak_apparent_mag=peak_mag,
+        peak_visible_mag=peak_vis_mag,
+        visible_seconds=visible_seconds,
         any_sunlit=any_sunlit,
     )
 
@@ -201,6 +227,8 @@ def _report_to_dict(r: TargetReport) -> dict:
         "score": r.score,
         "notes": r.notes,
         "peak_apparent_mag": r.peak_apparent_mag,
+        "peak_visible_mag": r.peak_visible_mag,
+        "visible_seconds": r.visible_seconds,
         "any_sunlit": r.any_sunlit,
     }
 

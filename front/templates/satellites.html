@@ -103,11 +103,14 @@
                      +  '<td>' + Math.round(p.duration_s) + ' s</td>'
                      +  '<td class="' + elClass + '">' + p.peak_el_deg.toFixed(1) + '&deg;</td>'
                      +  '<td class="' + rateClass + '">' + rate.toFixed(2) + ' &deg;/s</td>'
-                     +  '<td>' + (p.peak_apparent_mag != null
-                            ? (p.peak_apparent_mag <= 2 ? '<b>' : '')
-                              + (p.peak_apparent_mag).toFixed(1)
-                              + (p.peak_apparent_mag <= 2 ? '</b>' : '')
-                            : '<span class="text-muted" title="in Earth shadow during pass">--</span>') + '</td>'
+                     +  '<td>' + (p.peak_visible_mag != null
+                            ? (p.peak_visible_mag <= 2 ? '<b>' : '')
+                              + (p.peak_visible_mag).toFixed(1)
+                              + (p.peak_visible_mag <= 2 ? '</b>' : '')
+                              + (p.visible_seconds ? ' <small class="text-muted">(' + Math.round(p.visible_seconds) + 's)</small>' : '')
+                            : (p.any_sunlit
+                               ? '<span class="text-muted" title="sat is sunlit but observer sky is too bright (sun above -6°)">daytime</span>'
+                               : '<span class="text-muted" title="sat in Earth shadow throughout pass">shadow</span>')) + '</td>'
                      +  '<td>' + p.score.toFixed(0) + '</td>'
                      +  '<td>' + notesHtml + '</td>'
                      +  '<td><button type="button" class="btn btn-sm btn-outline-primary" '
