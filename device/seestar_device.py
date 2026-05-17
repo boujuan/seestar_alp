@@ -582,6 +582,18 @@ class Seestar:
                         event_name = parsed_data["Event"]
                         self.event_state[event_name] = parsed_data
 
+                        # Feed firmware-error monitor (records 'below
+                        # horizon' and similar user-actionable failures
+                        # the firmware emits but seestar_alp otherwise
+                        # silently swallows).
+                        try:
+                            from device.firmware_errors import (
+                                get_firmware_error_monitor,
+                            )
+                            get_firmware_error_monitor().observe(parsed_data)
+                        except Exception:
+                            pass
+
                         # {'Event': 'EqModePA', 'Timestamp': '740.411562378', 'state': 'working', 'lapse_ms': 0, 'route': []}
                         # {'Event': 'EqModePA', 'Timestamp': '6359.231750447', 'state': 'fail', 'error': 'fail to operate', 'code': 207, 'lapse_ms': 80471, 'route': []}
                         # {'Event': 'EqModePA', 'Timestamp': '876.787472028', 'state': 'complete', 'lapse_ms': 80653, 'total': 2.256415, 'x': -1.041047, 'y': -2.001906, 'route': []}
@@ -962,7 +974,6 @@ class Seestar:
         if self.is_goto():
             self.logger.info("Failed to goto target: mount is in goto routine.")
             return False
-        self.mark_goto_status_as_start()
 
         is_j2000 = params["is_j2000"]
         in_ra = params["ra"]
@@ -971,6 +982,62 @@ class Seestar:
         in_ra = parsed_coord.ra.hour
         in_dec = parsed_coord.dec.deg
         target_name = params.get("target_name", "unknown")
+
+        # Pre-flight horizon check: compute target altitude locally
+        # using ephem (already a project dep). Refuse below-horizon
+        # targets at submit time rather than waiting for the firmware
+        # silent-fail / 6s watchdog. Threshold -0.5 deg leaves a small
+        # margin for atmospheric refraction.
+        try:
+            import ephem
+            import math as _math
+            from datetime import datetime as _dt, timezone as _tz
+            from device.config import Config as _Cfg
+            from device.firmware_errors import (
+                get_firmware_error_monitor,
+                FirmwareError,
+                INFERRED_NO_AUTOGOTO_CODE,
+            )
+
+            _obs = ephem.Observer()
+            _obs.lat = str(_Cfg.init_lat)
+            _obs.lon = str(_Cfg.init_long)
+            _obs.date = _dt.now(_tz.utc).replace(tzinfo=None)
+            _body = ephem.FixedBody()
+            _body._ra = ephem.hours(in_ra * _math.pi / 12.0)
+            _body._dec = ephem.degrees(in_dec * _math.pi / 180.0)
+            _body._epoch = ephem.J2000
+            _body.compute(_obs)
+            _target_alt = _math.degrees(float(_body.alt))
+            if _target_alt < -0.5:
+                self.logger.warning(
+                    "goto_target refused (pre-flight): '%s' below horizon "
+                    "(alt %+.1f deg)", target_name, _target_alt,
+                )
+                _mon = get_firmware_error_monitor()
+                if _mon is not None:
+                    _mon._record(FirmwareError(
+                        when_utc=_dt.now(_tz.utc),
+                        event_name="pre_flight_horizon",
+                        code=INFERRED_NO_AUTOGOTO_CODE,
+                        error="Target below horizon",
+                        state="pre_flight",
+                        message=(
+                            f"'{target_name}' is below the horizon "
+                            f"(alt {_target_alt:+.1f} deg). "
+                            "Pick an above-horizon target."
+                        ),
+                        target_name=target_name,
+                        raw={"target_alt_deg": _target_alt},
+                    ))
+                return False
+        except Exception:
+            # Pre-flight is opportunistic; on any error fall through
+            # to the firmware path (the watchdog is still the backstop).
+            self.logger.debug("pre-flight horizon check skipped", exc_info=True)
+
+        self.mark_goto_status_as_start()
+
         self.logger.info(
             "%s: going to target... %s %s %s",
             self.device_name,
@@ -991,6 +1058,30 @@ class Seestar:
         self.mark_op_state("goto_target", "stopped")
 
         result = self.send_message_param_sync(data)
+
+        # If the firmware accepted the request but never actually
+        # engages AutoGoto (silent symptom of below-horizon target or
+        # stale View state), the watchdog records an inferred error so
+        # the UI banner can surface it. The on_silent_fail callback
+        # clears our local "goto in progress" flag — without it, the
+        # next goto would be rejected with "mount is in goto routine".
+        if "error" not in result:
+            try:
+                from device.firmware_errors import (
+                    get_firmware_error_monitor,
+                )
+
+                def _on_silent_fail(_name: str) -> None:
+                    self.logger.warning(
+                        "Goto watchdog: no AutoGoto fired for %s "
+                        "— clearing local goto state", _name)
+                    self.mark_goto_status_as_stopped()
+
+                get_firmware_error_monitor().notify_goto_submitted(
+                    target_name, on_silent_fail=_on_silent_fail)
+            except Exception:
+                pass
+
         return "error" not in result
 
     # {"method":"scope_goto","params":[1.2345,75.0]}

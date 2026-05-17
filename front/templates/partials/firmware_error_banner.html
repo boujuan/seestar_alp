@@ -1,0 +1,164 @@
+<!-- Firmware error banner. Included at the top of base.html so it sits
+     above the nav on every page. Yellow/warning style.
+
+     Polls /api/firmware_errors/status every 3 s. Auto-hides 30 s after
+     appearing if user doesn't dismiss. Dismiss POSTs to
+     /api/firmware_errors/dismiss. -->
+<div id="firmware-error-banner" data-has-error="false"
+     style="display:none;"
+     hx-get="/api/firmware_errors/status"
+     hx-trigger="load, every 3s"
+     hx-swap="none"
+     hx-on::after-request="window.__firmwareErrHandle(event)">
+</div>
+
+<style>
+  #firmware-error-banner.has-error {
+    display: block !important;
+    position: sticky;
+    top: 0;
+    z-index: 1950;
+    background: #d97706;  /* warning amber */
+    color: #fff;
+    padding: 12px 20px;
+    font-weight: 600;
+    font-size: 1rem;
+    line-height: 1.35;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+    border-bottom: 2px solid #92400e;
+  }
+  #firmware-error-banner .feb-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    margin-right: 8px;
+  }
+  #firmware-error-banner .feb-detail {
+    font-weight: 400;
+    opacity: 0.95;
+    display: block;
+    margin-top: 4px;
+    font-size: 0.85rem;
+  }
+  #firmware-error-banner button.feb-dismiss {
+    margin-left: 12px;
+    background: #fff;
+    color: #92400e;
+    border: 0;
+    border-radius: 4px;
+    font-weight: 700;
+    padding: 5px 12px;
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+  #firmware-error-banner button.feb-dismiss:hover {
+    background: #fde68a;
+  }
+</style>
+
+<script>
+(function () {
+  // Track the timestamp of the currently displayed error so we don't
+  // restart the auto-dismiss timer on every successful poll for the
+  // same error. Also track the timer handle so we can clear it.
+  var _currentErrorWhen = null;
+  var _autoDismissTimer = null;
+  var AUTO_DISMISS_MS = 30000;  // 30 s per requirements
+
+  function startAutoDismiss() {
+    if (_autoDismissTimer !== null) {
+      clearTimeout(_autoDismissTimer);
+    }
+    _autoDismissTimer = setTimeout(function () {
+      // Same dismiss action as the button — POST + clear UI.
+      window.__firmwareErrDismiss();
+    }, AUTO_DISMISS_MS);
+  }
+
+  function clearAutoDismiss() {
+    if (_autoDismissTimer !== null) {
+      clearTimeout(_autoDismissTimer);
+      _autoDismissTimer = null;
+    }
+  }
+
+  function render(data) {
+    var el = document.getElementById("firmware-error-banner");
+    if (!el) return;
+
+    if (!data.has_error || !data.error) {
+      // No active error — hide and stop any auto-dismiss timer.
+      el.classList.remove("has-error");
+      el.style.display = "none";
+      el.dataset.hasError = "false";
+      el.innerHTML = "";
+      _currentErrorWhen = null;
+      clearAutoDismiss();
+      return;
+    }
+
+    var err = data.error;
+    var isNewError = _currentErrorWhen !== err.when_utc;
+
+    el.dataset.hasError = "true";
+    el.classList.add("has-error");
+    el.style.display = "block";
+
+    // Compose detail string. Target name + firmware code on one short
+    // line gives enough diagnostic info without overwhelming the
+    // banner. Full event/state/raw is in the alpyca.log for deep
+    // debugging.
+    var codeStr = err.code === -1
+      ? "no AutoGoto event"
+      : "code " + err.code;
+    var nameStr = err.target_name
+      ? " (target: " + escapeHtml(err.target_name) + ")"
+      : "";
+
+    el.innerHTML =
+      '<span class="feb-title">&#9888; ' + escapeHtml(err.error) + '</span>' +
+      escapeHtml(err.message) +
+      '<button type="button" class="feb-dismiss" ' +
+      '  onclick="window.__firmwareErrDismiss()">Dismiss</button>' +
+      '<span class="feb-detail">' +
+      escapeHtml(err.event_name) + ' &mdash; ' + codeStr + nameStr +
+      '</span>';
+
+    // Start / reset the auto-dismiss timer only when a NEW error
+    // appears. Re-rendering the same error during polling doesn't
+    // restart the timer (user might be reading it).
+    if (isNewError) {
+      _currentErrorWhen = err.when_utc;
+      startAutoDismiss();
+    }
+  }
+
+  function escapeHtml(s) {
+    if (s == null) return "";
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  window.__firmwareErrHandle = function (event) {
+    try {
+      var xhr = event && event.detail && event.detail.xhr;
+      if (!xhr || xhr.status !== 200) return;
+      var data = JSON.parse(xhr.responseText);
+      render(data);
+    } catch (err) {
+      /* swallow — the next poll will retry */
+    }
+  };
+
+  window.__firmwareErrDismiss = function () {
+    clearAutoDismiss();
+    fetch("/api/firmware_errors/dismiss", {method: "POST"})
+      .then(function (r) { return r.json(); })
+      .then(function (data) { render(data); })
+      .catch(function () { /* ignore — next poll will reconcile */ });
+  };
+})();
+</script>
