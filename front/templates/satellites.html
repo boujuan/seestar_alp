@@ -154,9 +154,25 @@
             var notesHtml = (p.notes || []).map(function (n) {
                 return '<span class="badge bg-warning text-dark me-1">' + escapeHtml(n) + '</span>';
             }).join("");
-            if (!p.feasible) {
-                // Distinguish fixable (cable-wrap only — pre-position the
-                // mount before track) from real infeasibility.
+            if (p.near_zenith) {
+                // The alt-az singularity: az-rate diverges as the
+                // satellite approaches zenith. A pass culminating
+                // above ~75° with sky-rate > 80% of mount cap is
+                // doomed to az saturation near peak. We label this
+                // SEPARATELY from generic infeasibility because the
+                // failure mode and remedy are different — the only
+                // remedy is to skip the pass or accept lost-frames
+                // for ~10-20 s at culmination.
+                notesHtml = '<span class="badge bg-danger" '
+                          + 'title="Peak elevation > 75° combined with az-rate near mount cap (6 °/s). '
+                          + 'The alt-az singularity at zenith makes the required azimuth rate diverge as '
+                          + 'the satellite approaches the zenith. The mount WILL saturate for several seconds '
+                          + 'near culmination — the satellite will drift off-frame and may not be reacquired. '
+                          + 'This is a fundamental limitation of alt-az mounts, not a software bug.">'
+                          + 'near zenith &mdash; alt-az singularity</span> ' + notesHtml;
+            } else if (!p.feasible) {
+                // Distinguish fixable (cable-wrap only — pre-position
+                // the mount before track) from real infeasibility.
                 if (p.cable_wrap_only) {
                     notesHtml = '<span class="badge bg-warning text-dark" '
                               + 'title="The cable-wrap range will be exceeded if the mount starts at cum_az=0. '

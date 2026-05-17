@@ -64,6 +64,7 @@ class TargetReport:
     any_sunlit: bool = True
     sun_alt_min_deg: float = 0.0  # darkest sun altitude during the pass (negative = below horizon)
     cable_wrap_only: bool = False  # cable-wrap fails but everything else OK (pre-positioning fixes)
+    near_zenith: bool = False     # peak el > 75° AND az rate near/past mount cap (alt-az singularity)
 
     def summary(self) -> str:
         tag = "★" if self.tle_pinned else ("✓" if self.feasible else "✗")
@@ -116,6 +117,17 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
         or sim.el_sat_count
     )
     cable_wrap_only = bool(pre.cable_wrap_violations) and not truly_infeasible
+
+    # Near-zenith flag: the alt-az singularity makes az-rate diverge as
+    # peak elevation approaches 90°. A pass that culminates above 75°
+    # AND demands more than ~80% of the mount's azimuth cap is at
+    # serious risk of az-axis saturation (and even if it doesn't
+    # technically saturate, the controller may overshoot near zenith).
+    MAIN_RATE_DEGS = 6.0
+    near_zenith = (
+        peak_el_deg > 75.0
+        and pre.peak_v_az_degs > 0.8 * MAIN_RATE_DEGS
+    )
 
     # ---- Hard-zero cases ----
     # No mechanical way to track the pass cleanly.
@@ -213,6 +225,7 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
         any_sunlit=any_sunlit,
         sun_alt_min_deg=sun_alt_min_deg,
         cable_wrap_only=cable_wrap_only,
+        near_zenith=near_zenith,
     )
 
 
@@ -279,6 +292,7 @@ def _report_to_dict(r: TargetReport) -> dict:
         "any_sunlit": r.any_sunlit,
         "sun_alt_min_deg": r.sun_alt_min_deg,
         "cable_wrap_only": r.cable_wrap_only,
+        "near_zenith": r.near_zenith,
     }
 
 
