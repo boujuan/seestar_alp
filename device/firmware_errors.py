@@ -48,6 +48,11 @@ USER_ACTIONABLE_CODES: dict[int, str] = {
     270: "Target is below the horizon — pick an above-horizon target.",
     207: "Mount couldn't complete the operation. Try Stop / Unstick Goto.",
     253: "Operation aborted.",
+    527: (
+        "Target is too close to the zenith for an alt-az mount "
+        "— pick a target below ~85° altitude."
+    ),
+    501: "Mount goto failed. See AutoGoto box for details.",
 }
 
 
