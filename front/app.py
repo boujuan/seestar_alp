@@ -4673,10 +4673,14 @@ class SatellitesStartResource:
 
         dry_run = bool(body.get("dry_run", False))
         skip_precheck = bool(body.get("skip_precheck", False))
+        pre_slew = str(body.get("pre_slew", "platesolve"))
+        if pre_slew not in ("platesolve", "fast", "none"):
+            pre_slew = "platesolve"
         session, started = start_session(
             path,
             dry_run=dry_run,
             skip_precheck=skip_precheck,
+            pre_slew=pre_slew,
         )
         logger.info(
             "satellite session start: file=%s dry_run=%s skip_precheck=%s started_new=%s",

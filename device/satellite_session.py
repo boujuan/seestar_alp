@@ -92,6 +92,9 @@ class SatelliteTrackSession:
         host: str = "127.0.0.1",
         port: int = 5555,
         device_id: int = 1,
+        pre_slew: str = "platesolve",  # "platesolve" | "fast" | "none"
+        plate_solve_budget_s: float = 60.0,
+        intercept_safety_s: float = 3.0,
     ) -> None:
         self.path = Path(trajectory_path)
         self.dry_run = dry_run
@@ -107,6 +110,19 @@ class SatelliteTrackSession:
         self.host = host
         self.port = port
         self.device_id = device_id
+        # Pre-slew strategy:
+        #   "platesolve" — iscope_start_view to first reachable sat
+        #                  position with plate-solve cycle. Auto-aligns
+        #                  the mount near track region. Takes 30-90s.
+        #   "fast"       — point-to-point velocity_controller.move_to_ff
+        #                  to intercept point. ~5-10s. Assumes prior
+        #                  alignment is good (mobile-app 3PPA).
+        #   "none"       — no pre-slew, mount stays wherever it is,
+        #                  streaming controller catches up at start.
+        #                  Original behavior.
+        self.pre_slew = pre_slew
+        self.plate_solve_budget_s = plate_solve_budget_s
+        self.intercept_safety_s = intercept_safety_s
 
         self._lock = threading.Lock()
         self._stop_evt = threading.Event()
@@ -317,7 +333,124 @@ class SatelliteTrackSession:
                 current_wrapped_az_deg=az0_wrapped,
             )
 
-            # Wait until t_start; honor stop_signal while waiting.
+            # ---- Pre-slew to intercept point ----
+            # Compute the first sat position the mount can reach in time
+            # and pre-position there. This lets the streaming controller
+            # engage at the intercept moment instead of chasing.
+            t_engage_streaming = t_start_traj  # default = pass start
+            if self.pre_slew != "none" and not self.dry_run:
+                with self._lock:
+                    self._status.phase = "pre_slew"
+                ps_overhead = (self.plate_solve_budget_s
+                               if self.pre_slew == "platesolve" else 0.0)
+                intercept = find_intercept(
+                    provider, az0_wrapped, alt0,
+                    t_now=time.time(),
+                    mount_max_rate_degs=self.v_max,
+                    plate_solve_overhead_s=ps_overhead,
+                    safety_s=self.intercept_safety_s,
+                )
+                if intercept is None:
+                    logger.warning("intercept solver returned None — "
+                                   "sat outruns mount; falling back to no pre-slew")
+                    position_logger.mark_event("intercept_failed",
+                                                reason="sat_outruns_mount")
+                else:
+                    t_intercept, sat_az_target, sat_el_target = intercept
+                    # Convert intercept (az, el) at that time to RA/Dec
+                    # for the iscope_start_view call. RA/Dec are the
+                    # epoch-of-date apparent values; iscope accepts those.
+                    try:
+                        ra_h, dec_d = _altaz_to_radec(
+                            sat_az_target, sat_el_target, t_intercept,
+                            lat_deg=lat, lon_deg=lon,
+                        )
+                    except Exception as exc:
+                        logger.warning("altaz->radec failed: %s — skip pre-slew", exc)
+                        ra_h = dec_d = None
+
+                    if ra_h is not None:
+                        position_logger.mark_event(
+                            "intercept_chosen",
+                            t_intercept_unix=t_intercept,
+                            sat_az_deg=sat_az_target,
+                            sat_el_deg=sat_el_target,
+                            ra_h=ra_h, dec_d=dec_d,
+                            pre_slew_mode=self.pre_slew,
+                        )
+                        logger.info(
+                            "satellite pre-slew: intercept at t+%.0fs  "
+                            "sat_pos=(az=%.1f, el=%.1f)  ra=%.3fh dec=%.2f° (mode=%s)",
+                            t_intercept - time.time(),
+                            sat_az_target, sat_el_target, ra_h, dec_d,
+                            self.pre_slew,
+                        )
+                        if self.pre_slew == "platesolve":
+                            # iscope_start_view: triggers AutoGoto +
+                            # plate-solve cycle. Mount lands on
+                            # absolute pointing.
+                            cli.method_sync("iscope_start_view", {
+                                "mode": "star",
+                                "target_ra_dec": [ra_h, dec_d],
+                                "target_name": (
+                                    f"{pass_name} intercept t+"
+                                    f"{int(t_intercept - time.time())}s"
+                                ),
+                                "lp_filter": False,
+                            })
+                            term = _wait_for_autogoto(
+                                cli,
+                                deadline_s=self.plate_solve_budget_s,
+                                log_event=position_logger.mark_event,
+                            )
+                            logger.info("pre-slew AutoGoto terminal: %s", term)
+                            # Re-anchor cumulative az tracker after slew
+                            try:
+                                alt1, az1, _ = measure_altaz_timed(cli, loc)
+                                tracker = CumulativeAzTracker.load_or_fresh(
+                                    current_wrapped_az_deg=az1,
+                                )
+                                position_logger.mark_event(
+                                    "pre_slew_done",
+                                    post_alt=alt1, post_az=az1, terminal=term,
+                                )
+                            except Exception:
+                                pass
+                        elif self.pre_slew == "fast":
+                            # Point-to-point via velocity_controller.
+                            # No plate-solve, faster, assumes alignment.
+                            from device.velocity_controller import move_to_ff
+                            position_logger.mark_event("pre_slew_fast_start")
+                            try:
+                                move_to_ff(
+                                    cli=cli,
+                                    target_az_deg=sat_az_target,
+                                    target_el_deg=sat_el_target,
+                                    cur_az_deg=az0_wrapped,
+                                    cur_el_deg=alt0,
+                                    loc=loc,
+                                    tag="sat_intercept",
+                                    position_logger=position_logger,
+                                    v_max=self.v_max,
+                                    az_limits=az_limits,
+                                )
+                            except Exception as exc:
+                                logger.warning("move_to_ff pre-slew raised: %s", exc)
+                            try:
+                                alt1, az1, _ = measure_altaz_timed(cli, loc)
+                                tracker = CumulativeAzTracker.load_or_fresh(
+                                    current_wrapped_az_deg=az1,
+                                )
+                                position_logger.mark_event(
+                                    "pre_slew_done",
+                                    post_alt=alt1, post_az=az1,
+                                )
+                            except Exception:
+                                pass
+                        # Streaming should engage AT the intercept time
+                        t_engage_streaming = t_intercept
+
+            # Wait until t_engage_streaming; honor stop_signal while waiting.
             with self._lock:
                 self._status.phase = "waiting"
             while True:
@@ -329,9 +462,9 @@ class SatelliteTrackSession:
                         self._status.finished_unix = time.time()
                     return
                 now = time.time()
-                if now + self.latency_s >= t_start_traj:
+                if now + self.latency_s >= t_engage_streaming:
                     break
-                time.sleep(min(self.tick_dt, max(0.05, t_start_traj - now - self.latency_s)))
+                time.sleep(min(self.tick_dt, max(0.05, t_engage_streaming - now - self.latency_s)))
 
             with self._lock:
                 self._status.phase = "tracking"
@@ -370,6 +503,93 @@ class _SiteShim:
     lat_deg: float
     lon_deg: float
     alt_m: float
+
+
+def _great_circle_deg(az1: float, el1: float, az2: float, el2: float) -> float:
+    """Great-circle angular distance between two (az, el) points, deg."""
+    import math
+    a1 = math.radians(az1); e1 = math.radians(el1)
+    a2 = math.radians(az2); e2 = math.radians(el2)
+    cos_d = math.sin(e1) * math.sin(e2) + math.cos(e1) * math.cos(e2) * math.cos(a1 - a2)
+    cos_d = max(-1.0, min(1.0, cos_d))
+    return math.degrees(math.acos(cos_d))
+
+
+def find_intercept(
+    provider,
+    current_az_deg: float,
+    current_el_deg: float,
+    *,
+    t_now: float,
+    mount_max_rate_degs: float = 6.0,
+    ramp_s: float = 2.0,
+    plate_solve_overhead_s: float = 0.0,
+    safety_s: float = 3.0,
+    sample_step_s: float = 1.0,
+) -> Optional[tuple[float, float, float]]:
+    """Rendezvous solver: earliest sat position reachable in time.
+
+    Returns ``(t_intercept_unix, sat_az_deg, sat_el_deg)`` or None.
+
+    For each candidate sat-time t in the trajectory:
+      travel_time_s = great_circle(now_pos, sat_pos(t)) / max_rate + ramp
+      total_overhead_s = travel_time_s + plate_solve_overhead_s + safety_s
+      if (t - t_now) >= total_overhead_s: pick t
+
+    First feasible t wins. Returns None if the sat outruns the mount
+    for the entire trajectory.
+    """
+    t_min, t_max = provider.valid_range()
+    t_start_search = max(t_min, t_now + safety_s)
+    import numpy as _np
+    for t in _np.arange(t_start_search, t_max, sample_step_s):
+        sat = provider.sample(float(t))
+        sat_az = float(sat.az_cum_deg) % 360.0
+        sat_el = float(sat.el_deg)
+        dist = _great_circle_deg(current_az_deg, current_el_deg, sat_az, sat_el)
+        travel_time = dist / mount_max_rate_degs + ramp_s
+        overhead = travel_time + plate_solve_overhead_s + safety_s
+        if (t - t_now) >= overhead:
+            return float(t), sat_az, sat_el
+    return None
+
+
+def _altaz_to_radec(az_deg: float, el_deg: float, when_unix: float,
+                    lat_deg: float, lon_deg: float) -> tuple[float, float]:
+    """Convert apparent (az, el) → (RA hours, Dec deg) via astropy."""
+    from astropy.coordinates import AltAz, EarthLocation, SkyCoord
+    from astropy.time import Time
+    import astropy.units as u
+    loc = EarthLocation.from_geodetic(lon=lon_deg * u.deg, lat=lat_deg * u.deg)
+    aa = SkyCoord(
+        az=az_deg * u.deg, alt=el_deg * u.deg,
+        frame=AltAz(obstime=Time(when_unix, format="unix"), location=loc),
+    )
+    icrs = aa.transform_to("icrs")
+    return float(icrs.ra.hour), float(icrs.dec.deg)
+
+
+def _wait_for_autogoto(cli, deadline_s: float, log_event=None) -> str:
+    """Poll AutoGoto event_state until 'complete' / 'fail' / timeout.
+
+    Returns the terminal state ('complete', 'fail', 'aborted', 'timeout').
+    """
+    end = time.time() + deadline_s
+    last_state = None
+    while time.time() < end:
+        try:
+            r = cli.method_sync("get_event_state", {"event_name": "AutoGoto"})
+            st = (r.get("result") or {}).get("AutoGoto", {}).get("state")
+            if st != last_state:
+                if log_event is not None:
+                    log_event("autogoto_state", state=st)
+                last_state = st
+            if st in ("complete", "fail", "aborted"):
+                return st
+        except Exception:
+            pass
+        time.sleep(1.0)
+    return "timeout"
 
 
 # ---------- module-level singleton ----------

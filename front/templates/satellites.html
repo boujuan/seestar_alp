@@ -553,16 +553,42 @@
                 "OK  = dry-run only — logs decisions, mount stays still. Exercises the whole pipeline safely.\n" +
                 "Cancel = LIVE track — mount actually slews to follow the satellite."
               );
+        // Pre-slew mode picker for LIVE mode (dry-run has no pre-slew)
+        var preSlew = "none";
+        if (!dryRunChoice) {
+            var preSlewPick = prompt(
+                "Pre-slew mode for " + passName + "?\n\n" +
+                "  platesolve = iscope_start_view to intercept (30-90s, auto-aligns mount, RECOMMENDED if not already 3PPA-aligned)\n" +
+                "  fast       = point-to-point goto (~5-10s, assumes prior alignment)\n" +
+                "  none       = no pre-slew, streaming engages at pass start (chases sat)\n\n" +
+                "Type one of: platesolve / fast / none",
+                "platesolve"
+            );
+            if (preSlewPick === null) return;  // user cancelled
+            preSlew = (preSlewPick || "platesolve").trim().toLowerCase();
+            if (preSlew !== "platesolve" && preSlew !== "fast" && preSlew !== "none") {
+                preSlew = "platesolve";
+            }
+        }
         if (dryRunChoice) {
             if (!confirm("DRY-RUN " + passName + "?\n\nNo motor commands. Click OK to start dry-run." + cableWarn)) return;
         } else {
-            if (!confirm("LIVE TRACK " + passName + "?\n\nThe mount WILL slew. Make sure cables are clear and nothing is in the way." + cableWarn)) return;
+            if (!confirm(
+                "LIVE TRACK " + passName + "?\n\n" +
+                "Pre-slew: " + preSlew + "\n\n" +
+                "The mount WILL slew. Make sure cables are clear and nothing is in the way." + cableWarn
+            )) return;
         }
         var skipPre = !!(passData && passData.cable_wrap_only);
         fetch("/api/satellites/start", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({file: filePath, dry_run: dryRunChoice, skip_precheck: skipPre}),
+            body: JSON.stringify({
+                file: filePath,
+                dry_run: dryRunChoice,
+                skip_precheck: skipPre,
+                pre_slew: preSlew,
+            }),
         }).then(function (r) {
             if (r.status === 409) {
                 alert("Another satellite session is already active. Stop it first.");
