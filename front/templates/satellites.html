@@ -24,7 +24,7 @@
 </div>
 
 <div class="panel-card panel-card-tight no-htmx-fx mb-2">
-    <div class="d-flex gap-3 align-items-center flex-wrap">
+    <div class="d-flex gap-3 align-items-center flex-wrap mb-2">
         <label class="form-check-label">
             <input type="checkbox" id="filterVisibleOnly" class="form-check-input me-1">
             Visible only
@@ -34,6 +34,26 @@
             ISS &amp; Tianhe only
         </label>
         <span class="text-muted small ms-auto">Click a row to preview the sky-plot. Click column headers to sort.</span>
+    </div>
+    <div class="d-flex gap-3 align-items-center flex-wrap small">
+        <span class="text-muted">Track settings:</span>
+        <label class="form-check-label">
+            <input type="checkbox" id="trackDryRun" class="form-check-input me-1">
+            Dry-run <span class="text-muted">(no motor commands)</span>
+        </label>
+        <label class="form-check-label">
+            Pre-slew:
+            <select id="trackPreSlew" class="form-select form-select-sm d-inline-block" style="width: 130px;">
+                <option value="platesolve">platesolve (~60s, auto-aligns)</option>
+                <option value="fast" selected>fast (~10s, needs prior alignment)</option>
+                <option value="none">none (chase from start)</option>
+            </select>
+        </label>
+        <label class="form-check-label">
+            <input type="checkbox" id="trackSkipPrecheck" class="form-check-input me-1">
+            Skip pre-check <span class="text-muted">(bypass cable-wrap / FF refusal)</span>
+        </label>
+        <span class="ms-auto"></span>
     </div>
 </div>
 
@@ -380,6 +400,12 @@
             _priorityOnly = ev.target.checked;
             localStorage.setItem("sat.priorityOnly", String(_priorityOnly));
             renderTable(null);
+        } else if (ev.target.id === "trackDryRun") {
+            localStorage.setItem("sat.trackDryRun", String(ev.target.checked));
+        } else if (ev.target.id === "trackPreSlew") {
+            localStorage.setItem("sat.trackPreSlew", ev.target.value);
+        } else if (ev.target.id === "trackSkipPrecheck") {
+            localStorage.setItem("sat.trackSkipPrecheck", String(ev.target.checked));
         }
     });
 
@@ -541,53 +567,32 @@
 
     window.__satTrack = function (filePath, passName) {
         var passData = _passes.find(function (p) { return p.path === filePath; });
-        var cableWarn = "";
-        if (passData && passData.cable_wrap_only) {
-            cableWarn = "\n\nThis pass has a cable-wrap warning: starting from cum_az=0, the slew exceeds the +/-435 deg usable range. "
-                      + "Pre-position the mount before clicking Track, or accept that the track may abort early at the wrap limit.";
-        }
-        var dryRunChoice = window.__satForceDryRun !== undefined
-            ? window.__satForceDryRun
-            : confirm(
-                "DRY RUN? (no motor commands)\n\n" +
-                "OK  = dry-run only — logs decisions, mount stays still. Exercises the whole pipeline safely.\n" +
-                "Cancel = LIVE track — mount actually slews to follow the satellite."
-              );
-        // Pre-slew mode picker for LIVE mode (dry-run has no pre-slew)
-        var preSlew = "none";
-        if (!dryRunChoice) {
-            var preSlewPick = prompt(
-                "Pre-slew mode for " + passName + "?\n\n" +
-                "  platesolve = iscope_start_view to intercept (30-90s, auto-aligns mount, RECOMMENDED if not already 3PPA-aligned)\n" +
-                "  fast       = point-to-point goto (~5-10s, assumes prior alignment)\n" +
-                "  none       = no pre-slew, streaming engages at pass start (chases sat)\n\n" +
-                "Type one of: platesolve / fast / none",
-                "platesolve"
-            );
-            if (preSlewPick === null) return;  // user cancelled
-            preSlew = (preSlewPick || "platesolve").trim().toLowerCase();
-            if (preSlew !== "platesolve" && preSlew !== "fast" && preSlew !== "none") {
-                preSlew = "platesolve";
-            }
-        }
-        if (dryRunChoice) {
-            if (!confirm("DRY-RUN " + passName + "?\n\nNo motor commands. Click OK to start dry-run." + cableWarn)) return;
+        var dryRun = !!document.getElementById("trackDryRun").checked;
+        var preSlew = document.getElementById("trackPreSlew").value || "fast";
+        // Auto-set skip_precheck for cable-wrap-only passes, or honor user toggle
+        var userSkipPre = !!document.getElementById("trackSkipPrecheck").checked;
+        var skipPre = userSkipPre || !!(passData && passData.cable_wrap_only);
+
+        var note = "";
+        if (dryRun) {
+            note = "DRY-RUN — no motor commands.";
         } else {
-            if (!confirm(
-                "LIVE TRACK " + passName + "?\n\n" +
-                "Pre-slew: " + preSlew + "\n\n" +
-                "The mount WILL slew. Make sure cables are clear and nothing is in the way." + cableWarn
-            )) return;
+            note = "LIVE TRACK — mount will slew.\nPre-slew: " + preSlew + "."
+                 + (passData && passData.cable_wrap_only
+                     ? "\n\n⚠ cable-wrap warning: pre-position the mount or accept early abort."
+                     : "")
+                 + "\n\nMake sure cables are clear and nothing is in the mount's way.";
         }
-        var skipPre = !!(passData && passData.cable_wrap_only);
+        if (!confirm("Track " + passName + "?\n\n" + note)) return;
+
         fetch("/api/satellites/start", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({
                 file: filePath,
-                dry_run: dryRunChoice,
+                dry_run: dryRun,
                 skip_precheck: skipPre,
-                pre_slew: preSlew,
+                pre_slew: dryRun ? "none" : preSlew,  // dry-run skips pre-slew
             }),
         }).then(function (r) {
             if (r.status === 409) {
@@ -654,6 +659,13 @@
         if (vo) vo.checked = _visibleOnly;
         var po = document.getElementById("filterPriorityOnly");
         if (po) po.checked = _priorityOnly;
+        // Restore Track-settings toggles
+        var dr = document.getElementById("trackDryRun");
+        if (dr) dr.checked = localStorage.getItem("sat.trackDryRun") === "true";
+        var ps = document.getElementById("trackPreSlew");
+        if (ps) ps.value = localStorage.getItem("sat.trackPreSlew") || "fast";
+        var sp = document.getElementById("trackSkipPrecheck");
+        if (sp) sp.checked = localStorage.getItem("sat.trackSkipPrecheck") === "true";
         fetchList();
         fetchSessionState();
         setInterval(tickClock, 1000);
