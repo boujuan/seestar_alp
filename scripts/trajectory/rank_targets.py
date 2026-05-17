@@ -30,9 +30,31 @@ from device.reference_provider import JsonlECEFProvider
 from device.streaming_controller import pre_check
 from device.target_frame import MountFrame
 from scripts.trajectory import replay
+from scripts.trajectory.observer import build_site
 
 
 DEFAULT_DIR = Path("data/trajectories/satellites")
+
+
+def _site_from_config():
+    """Build an ObserverSite anchored to the Seestar's configured location.
+
+    Critical: JsonlECEFProvider re-projects the file's ECEF samples
+    through the MountFrame's site. If the site differs from the one
+    that fetch_satellites used to write the file (header), the
+    resulting az/el are wildly wrong (LA observing a Vigo pass gets
+    a 15° az span instead of 270°). Always read from Config so the
+    pipeline is internally consistent.
+    """
+    try:
+        from device.config import Config
+        return build_site(
+            lat_deg=float(Config.init_lat),
+            lon_deg=float(Config.init_long),
+            alt_m=float(getattr(Config, "init_height", 0.0) or 0.0),
+        )
+    except Exception:
+        return build_site()  # env-var defaults
 
 
 @dataclass
@@ -250,7 +272,7 @@ def rank_and_index(
     jsonl_paths = sorted(p for p in directory.glob("*.jsonl") if not p.name.startswith("_"))
     if not jsonl_paths:
         return []
-    mount_frame = MountFrame.from_identity_enu()
+    mount_frame = MountFrame.from_identity_enu(_site_from_config())
 
     reports: list[TargetReport] = []
     for p in jsonl_paths:

@@ -383,7 +383,18 @@ def fetch_and_export(
     if out_dir is None:
         out_dir = Path("data/trajectories/satellites")
 
-    site = build_site()
+    # Prefer the Seestar's configured site over env-var defaults so
+    # the file headers and downstream pre-check stay consistent with
+    # the actual observer location.
+    try:
+        from device.config import Config
+        site = build_site(
+            lat_deg=float(Config.init_lat),
+            lon_deg=float(Config.init_long),
+            alt_m=float(getattr(Config, "init_height", 0.0) or 0.0),
+        )
+    except Exception:
+        site = build_site()
     load = _loader()
     ts = load.timescale()
     # Planetary ephemeris for sunlit-shadow check. First call downloads
