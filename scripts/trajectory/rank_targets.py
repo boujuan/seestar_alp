@@ -119,15 +119,16 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
     cable_wrap_only = bool(pre.cable_wrap_violations) and not truly_infeasible
 
     # Near-zenith flag: the alt-az singularity makes az-rate diverge as
-    # peak elevation approaches 90°. A pass that culminates above 75°
-    # AND demands more than ~80% of the mount's azimuth cap is at
-    # serious risk of az-axis saturation (and even if it doesn't
-    # technically saturate, the controller may overshoot near zenith).
-    MAIN_RATE_DEGS = 6.0
-    near_zenith = (
-        peak_el_deg > 75.0
-        and pre.peak_v_az_degs > 0.8 * MAIN_RATE_DEGS
-    )
+    # peak elevation approaches 90°. Math: peak_az_rate ≈ v_skyrate /
+    # sin(90° - peak_el). For LEO sats at ~1.1 °/s sky-rate, peak_el=78°
+    # demands az_rate=5.3 °/s (88% of mount cap), peak_el=80° demands
+    # 6.3 °/s (over cap). We use peak elevation alone here because
+    # pre_check's per-tick peak_v_az is suspiciously low for these
+    # passes (the cubic spline through ECEF samples smooths over the
+    # near-zenith singularity, hiding it). The 78° threshold is
+    # conservative — anything above is at real risk of az saturation
+    # for several seconds at culmination.
+    near_zenith = peak_el_deg > 78.0
 
     # ---- Hard-zero cases ----
     # No mechanical way to track the pass cleanly.
