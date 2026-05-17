@@ -4399,8 +4399,11 @@ def _satellites_refresh_worker(hours: float, top_n: int) -> None:
 
         fetch_and_export(hours=hours, top_n=top_n, out_dir=_SATELLITES_DIR)
         rank_and_index(_SATELLITES_DIR, json_out=_SATELLITES_INDEX)
+        # Count entries WITHOUT holding the refresh lock (the payload
+        # helper acquires it internally — would deadlock).
+        n = len(_satellites_index_payload()["passes"])
         with _satellite_refresh_lock:
-            _satellite_refresh_state["last_n"] = len(_satellites_index_payload()["passes"])
+            _satellite_refresh_state["last_n"] = n
     except Exception as exc:
         logger.warning("satellites refresh failed: %s", exc, exc_info=True)
         with _satellite_refresh_lock:
@@ -4417,7 +4420,20 @@ class SatellitesPageResource:
     @staticmethod
     def on_get(req, resp):
         payload = _satellites_index_payload()
-        render_template(req, resp, "satellites.html", **payload)
+        # /satellites is a global page; pick the first configured
+        # telescope for the nav/context (matches HomeResource pattern).
+        telescopes = get_telescopes_state()
+        tid = telescopes[0]["device_num"] if telescopes else 0
+        context = get_context(tid, req)
+        # Don't double-pass 'telescopes' if already in context
+        if "telescopes" in context:
+            del context["telescopes"]
+        render_template(
+            req, resp, "satellites.html",
+            telescopes=telescopes,
+            **context,
+            **payload,
+        )
 
 
 class SatellitesListResource:
