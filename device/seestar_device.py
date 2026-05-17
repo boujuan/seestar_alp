@@ -520,6 +520,18 @@ class Seestar:
                         event_name = parsed_data["Event"]
                         self.event_state[event_name] = parsed_data
 
+                        # Feed firmware-error monitor (records 'below
+                        # horizon' and similar user-actionable failures
+                        # the firmware emits but seestar_alp otherwise
+                        # silently swallows).
+                        try:
+                            from device.firmware_errors import (
+                                get_firmware_error_monitor,
+                            )
+                            get_firmware_error_monitor().observe(parsed_data)
+                        except Exception:
+                            pass
+
                         # {'Event': 'EqModePA', 'Timestamp': '740.411562378', 'state': 'working', 'lapse_ms': 0, 'route': []}
                         # {'Event': 'EqModePA', 'Timestamp': '6359.231750447', 'state': 'fail', 'error': 'fail to operate', 'code': 207, 'lapse_ms': 80471, 'route': []}
                         # {'Event': 'EqModePA', 'Timestamp': '876.787472028', 'state': 'complete', 'lapse_ms': 80653, 'total': 2.256415, 'x': -1.041047, 'y': -2.001906, 'route': []}
@@ -853,6 +865,30 @@ class Seestar:
         self.mark_op_state("goto_target", "stopped")
 
         result = self.send_message_param_sync(data)
+
+        # If the firmware accepted the request but never actually
+        # engages AutoGoto (silent symptom of below-horizon target or
+        # stale View state), the watchdog records an inferred error so
+        # the UI banner can surface it. The on_silent_fail callback
+        # clears our local "goto in progress" flag — without it, the
+        # next goto would be rejected with "mount is in goto routine".
+        if "error" not in result:
+            try:
+                from device.firmware_errors import (
+                    get_firmware_error_monitor,
+                )
+
+                def _on_silent_fail(_name: str) -> None:
+                    self.logger.warning(
+                        "Goto watchdog: no AutoGoto fired for %s "
+                        "— clearing local goto state", _name)
+                    self.mark_goto_status_as_stopped()
+
+                get_firmware_error_monitor().notify_goto_submitted(
+                    target_name, on_silent_fail=_on_silent_fail)
+            except Exception:
+                pass
+
         return "error" not in result
 
     # {"method":"scope_goto","params":[1.2345,75.0]}

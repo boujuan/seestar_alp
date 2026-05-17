@@ -3247,6 +3247,57 @@ class LiveModeResource:
         resp.text = mode
 
 
+# ---------- Firmware error banner (below-horizon etc) ---------------
+
+
+def _firmware_error_payload():
+    """JSON shape consumed by the firmware-error banner partial.
+
+    Returns ``{has_error, error}`` where ``error`` is either None or a
+    dict of the last unread error from the FirmwareErrorMonitor.
+    """
+    from device.firmware_errors import get_firmware_error_monitor
+
+    err = get_firmware_error_monitor().get_pending()
+    if err is None:
+        return {"has_error": False, "error": None}
+    return {
+        "has_error": True,
+        "error": {
+            "when_utc": err.when_utc.isoformat(),
+            "event_name": err.event_name,
+            "code": err.code,
+            "error": err.error,
+            "state": err.state,
+            "message": err.message,
+            "target_name": err.target_name,
+        },
+    }
+
+
+class FirmwareErrorStatusResource:
+    """GET endpoint polled by the banner partial every few seconds."""
+
+    @staticmethod
+    def on_get(req, resp):
+        resp.status = falcon.HTTP_200
+        resp.content_type = "application/json"
+        resp.text = json.dumps(_firmware_error_payload())
+
+
+class FirmwareErrorDismissResource:
+    """POST endpoint that clears the unread error so the banner hides."""
+
+    @staticmethod
+    def on_post(req, resp):
+        from device.firmware_errors import get_firmware_error_monitor
+
+        get_firmware_error_monitor().dismiss()
+        resp.status = falcon.HTTP_200
+        resp.content_type = "application/json"
+        resp.text = json.dumps(_firmware_error_payload())
+
+
 class LiveGotoResource(BaseResource):
     def on_post(self, req, resp, telescope_id=1):
         target = req.media["target"]
@@ -5125,6 +5176,15 @@ class FrontMain:
         app.add_route("/reload", ReloadResource())
         app.add_route("/{telescope_id:int}/", HomeTelescopeResource())
         app.add_route("/{telescope_id:int}/goto", GotoResource())
+        # ---- Firmware error banner (global; not per-telescope) ----
+        app.add_route(
+            "/api/firmware_errors/status",
+            FirmwareErrorStatusResource(),
+        )
+        app.add_route(
+            "/api/firmware_errors/dismiss",
+            FirmwareErrorDismissResource(),
+        )
         app.add_route("/{telescope_id:int}/command", CommandResource())
         app.add_route("/{telescope_id:int}/console", ConsoleResource())
         app.add_route("/{telescope_id:int}/image", ImageResource())
