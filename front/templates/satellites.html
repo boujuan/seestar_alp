@@ -169,7 +169,7 @@
                           + (p.peak_visible_mag <= 2 ? '</b>' : '')
                           + (p.visible_seconds ? ' <small class="text-muted">(' + Math.round(p.visible_seconds) + 's)</small>' : '')
                         : (p.any_sunlit
-                           ? '<span class="text-muted" title="sat is sunlit but observer sky is too bright (sun above -6°)">daytime</span>'
+                           ? '<span class="text-muted" title="sat is sunlit but observer sky is still too bright (sun above -3°, i.e. before deep civil twilight)">twilight</span>'
                            : '<span class="text-muted" title="sat in Earth shadow throughout pass">shadow</span>')) + '</td>'
                  +  '<td>' + p.score.toFixed(0) + '</td>'
                  +  '<td>' + notesHtml + '</td>'

@@ -113,7 +113,11 @@ def _peak_apparent_magnitude(
 
     Visibility model:
       - Sat must be in sunlight (skyfield is_sunlit).
-      - Sky must be dark enough at the observer (sun alt < -6°, civil twilight).
+      - Sky must be dark enough at the observer (sun alt < -3°). This
+        is the standard satellite-spotting threshold — bright LEO sats
+        (mag < +3) are clearly visible from this point onward, well
+        before astronomical twilight ends. Stricter definitions:
+        civil twilight ends at -6°, nautical at -12°, astronomical at -18°.
       - Visible mag = std + 5·log10(range/1000) − 2.5·log10(phase_func).
       - phase_func is a diffuse 0.5 fallback (good to ±0.5 mag).
     """
@@ -143,7 +147,10 @@ def _peak_apparent_magnitude(
         except Exception:
             pass
 
-    sky_dark = sun_alt_obs < -6.0  # civil twilight or darker
+    # Threshold tuned for bright LEO sat visibility. Civil-twilight end
+    # (-6°) is too strict — ISS / Tianhe at +1 mag are easily visible
+    # from sun_alt ≈ -3° (deep civil twilight). See docstring.
+    sky_dark = sun_alt_obs < -3.0
 
     # Apparent magnitude per tick
     range_km = sat_slant_m_grid / 1000.0
