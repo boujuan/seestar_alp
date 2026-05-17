@@ -233,7 +233,32 @@ class SatelliteTrackSession:
             self._status.pass_start_unix = float(t_start_traj)
             self._status.pass_end_unix = float(t_end_traj)
 
-        # Pre-check
+        # Pre-check 0: refuse if mount is in EQ mode. The streaming
+        # controller commands az/el directional moves; in EQ mode the
+        # physical axes are RA/Dec and the same command would slew the
+        # mount in wildly wrong directions. The Seestar firmware exposes
+        # mount.equ_mode in get_device_state.
+        try:
+            cli_probe = AlpacaClient(self.host, self.port, self.device_id)
+            dev_state = cli_probe.method_sync("get_device_state").get("result", {})
+            if dev_state.get("mount", {}).get("equ_mode") is True:
+                with self._lock:
+                    self._status.phase = "finished"
+                    self._status.exit_reason = "eq_mode_unsupported"
+                    self._status.errors.append(
+                        "Mount is in EQ mode — satellite tracking only "
+                        "supports alt-az for now. Switch the Seestar to "
+                        "alt-az mode and try again."
+                    )
+                    self._status.active = False
+                    self._status.finished_unix = time.time()
+                return
+        except Exception:
+            # If we can't query mount state, log it but continue —
+            # the user may be on older firmware that doesn't expose it.
+            logger.debug("equ_mode probe failed", exc_info=True)
+
+        # Pre-check 1: cable wrap, el-limit, FF saturation
         az_limits = AzimuthLimits.load()
         pre = pre_check(
             provider, az_limits=az_limits,

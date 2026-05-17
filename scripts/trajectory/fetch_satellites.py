@@ -41,7 +41,9 @@ CELESTRAK_GROUPS = {
 
 # Pass filter parameters (can be overridden on CLI).
 MIN_CULM_EL_DEG = 20.0
-MAX_CULM_EL_DEG = 80.0
+MAX_CULM_EL_DEG = 89.5  # near-zenith passes are kinematically very hard for
+                        # alt-az mounts but the UI labels them and the user
+                        # can filter; don't pre-drop them from the list.
 MIN_PASS_DURATION_S = 240.0
 MIN_EL_DEG_FOR_PASS = 10.0  # rise/set threshold for find_events
 
