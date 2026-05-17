@@ -1398,8 +1398,15 @@ def do_goto_target(req, resp, telescope_id):
     ra = form["ra"]
     dec = form["dec"]
     useJ2000 = form.get("useJ2000") == "on"
+    bypassSun = form.get("bypassSunSafety") == "on"
     errors = {}
-    values = {"target_name": targetName, "is_j2000": useJ2000, "ra": ra, "dec": dec}
+    values = {
+        "target_name": targetName,
+        "is_j2000": useJ2000,
+        "ra": ra,
+        "dec": dec,
+        "bypass_sun_safety": bypassSun,
+    }
 
     if not check_ra_value(ra):
         flash(resp, "Invalid RA value")
@@ -1415,6 +1422,13 @@ def do_goto_target(req, resp, telescope_id):
 
     response = do_action_device("goto_target", telescope_id, values)
     logger.info("POST immediate request %s %s", values, response)
+
+    # Detect the structured pre-flight refusal and surface it to the
+    # template so the confirm-modal partial can render it.
+    inner = response.get("Value") if isinstance(response, dict) else None
+    if isinstance(inner, dict) and inner.get("reason") == "sun_safety_confirmation_required":
+        values["sun_safety_confirm"] = inner.get("guard") or {}
+        flash(resp, "Sun safety: confirm to proceed (filter required).")
 
     return values, errors
 
@@ -4660,30 +4674,74 @@ class LiveTrackerResetResource:
 
 
 def _sun_safety_payload():
-    from device.sun_safety import get_sun_monitor
+    """Combined payload: reactive-monitor trip state PLUS pre-flight enable flag.
 
+    The toggle pill reads ``enabled``; the trip banner reads ``tripped``/``trip``.
+    """
+    from device.sun_safety import (
+        DEFAULT_MIN_SEPARATION_DEG,
+        get_sun_monitor,
+        is_pre_flight_enabled,
+    )
+
+    payload = {
+        "tripped": False,
+        "trip": None,
+        "enabled": bool(is_pre_flight_enabled()),
+        "min_separation_deg": DEFAULT_MIN_SEPARATION_DEG,
+    }
     m = get_sun_monitor()
     if m is None:
-        return {"tripped": False, "trip": None}
+        return payload
     trip = m.last_trip()
     if trip is None:
-        return {"tripped": False, "trip": None}
-    return {
-        "tripped": True,
-        "trip": {
-            "when_utc": trip.when_utc.isoformat(),
-            "sun_az_deg": round(trip.sun_az_deg, 2),
-            "sun_alt_deg": round(trip.sun_alt_deg, 2),
-            "mount_az_deg": round(trip.mount_az_deg, 2),
-            "mount_el_deg": round(trip.mount_el_deg, 2),
-            "separation_deg": round(trip.separation_deg, 2),
-            "cone_deg": round(trip.cone_deg, 2),
-            "jog_angle_deg": int(trip.jog_angle_deg),
-            "jog_speed": int(trip.jog_speed),
-            "jog_duration_s": int(trip.jog_duration_s),
-            "message": trip.message,
-        },
+        return payload
+    payload["tripped"] = True
+    payload["trip"] = {
+        "when_utc": trip.when_utc.isoformat(),
+        "sun_az_deg": round(trip.sun_az_deg, 2),
+        "sun_alt_deg": round(trip.sun_alt_deg, 2),
+        "mount_az_deg": round(trip.mount_az_deg, 2),
+        "mount_el_deg": round(trip.mount_el_deg, 2),
+        "separation_deg": round(trip.separation_deg, 2),
+        "cone_deg": round(trip.cone_deg, 2),
+        "jog_angle_deg": int(trip.jog_angle_deg),
+        "jog_speed": int(trip.jog_speed),
+        "jog_duration_s": int(trip.jog_duration_s),
+        "message": trip.message,
     }
+    return payload
+
+
+class SunSafetyToggleResource:
+    """POST {enabled: bool} — runtime-toggles BOTH the pre-flight check AND
+    the reactive SunSafetyMonitor.enabled flag, so the bottom-right pill
+    controls all sun-safety behaviors in lock-step."""
+
+    @staticmethod
+    def on_post(req, resp):
+        from device.sun_safety import (
+            get_sun_monitor,
+            set_pre_flight_enabled,
+        )
+
+        try:
+            body = req.media if req.content_length else {}
+        except Exception:
+            body = {}
+        enabled = bool(body.get("enabled", True))
+        set_pre_flight_enabled(enabled)
+        m = get_sun_monitor()
+        if m is not None:
+            try:
+                m.reload(enabled=enabled)
+            except Exception:
+                logger.debug("monitor.reload(enabled) failed", exc_info=True)
+        logger.info(
+            "sun_safety toggle: pre-flight + monitor enabled=%s", enabled)
+        resp.status = falcon.HTTP_200
+        resp.content_type = "application/json"
+        resp.text = json.dumps(_sun_safety_payload())
 
 
 class SunSafetyStatusResource:
@@ -8317,6 +8375,10 @@ class FrontMain:
         app.add_route(
             "/api/sun_safety/dismiss",
             SunSafetyDismissResource(),
+        )
+        app.add_route(
+            "/api/sun_safety/toggle",
+            SunSafetyToggleResource(),
         )
         # ---- Calibrate rotation (browser UI for 3-DOF calibration) ----
         app.add_route(

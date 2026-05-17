@@ -982,12 +982,68 @@ class Seestar:
         in_ra = parsed_coord.ra.hour
         in_dec = parsed_coord.dec.deg
         target_name = params.get("target_name", "unknown")
+        bypass_sun_safety = bool(params.get("bypass_sun_safety", False))
 
-        # Pre-flight horizon check: compute target altitude locally
-        # using ephem (already a project dep). Refuse below-horizon
-        # targets at submit time rather than waiting for the firmware
-        # silent-fail / 6s watchdog. Threshold -0.5 deg leaves a small
-        # margin for atmospheric refraction.
+        # Pre-flight sun-safety: refuse the slew if the target or the
+        # alt-az path crosses the sun's exclusion cone. The IMX585
+        # sensor is destroyed in seconds by direct unfiltered sun, so
+        # the default is conservative; operator can disable per-call
+        # (bypass_sun_safety) or globally (sun_safety.set_pre_flight_enabled).
+        try:
+            from device.sun_safety import (
+                is_pre_flight_enabled,
+                evaluate_goto_safety,
+            )
+
+            if not bypass_sun_safety and is_pre_flight_enabled():
+                start_az = start_el = None
+                try:
+                    from astropy.coordinates import AltAz, EarthLocation, SkyCoord
+                    from astropy.time import Time
+                    import astropy.units as u
+                    from device.config import Config
+
+                    cur_ra = float(self.ra)
+                    cur_dec = float(self.dec)
+                    # Firmware reports (0, 0) before any plate-solve
+                    # alignment — treat as "unknown" so we don't feed
+                    # bogus start coords into the path check.
+                    if abs(cur_ra) > 1e-6 or abs(cur_dec) > 1e-6:
+                        loc = EarthLocation.from_geodetic(
+                            lat=float(Config.init_lat) * u.deg,
+                            lon=float(Config.init_long) * u.deg,
+                        )
+                        aa = SkyCoord(
+                            ra=cur_ra * u.hour, dec=cur_dec * u.deg, frame="icrs"
+                        ).transform_to(
+                            AltAz(obstime=Time.now(), location=loc)
+                        )
+                        start_az = float(aa.az.deg) % 360.0
+                        start_el = float(aa.alt.deg)
+                except Exception:
+                    pass
+
+                guard = evaluate_goto_safety(
+                    in_ra, in_dec,
+                    start_az_deg=start_az, start_el_deg=start_el,
+                )
+                if not guard["safe"]:
+                    self.logger.warning(
+                        "goto_target refused by sun-safety pre-flight: %s",
+                        guard["reason"],
+                    )
+                    return {
+                        "ok": False,
+                        "reason": "sun_safety_confirmation_required",
+                        "guard": guard,
+                        "target_name": target_name,
+                    }
+        except Exception:
+            self.logger.debug("sun-safety pre-flight skipped", exc_info=True)
+
+        # Pre-flight horizon check: refuse below-horizon targets at
+        # submit time rather than waiting for the firmware silent-fail
+        # / 6s watchdog. Threshold -0.5 deg leaves margin for refraction.
         try:
             import ephem
             import math as _math
@@ -1032,12 +1088,9 @@ class Seestar:
                     ))
                 return False
         except Exception:
-            # Pre-flight is opportunistic; on any error fall through
-            # to the firmware path (the watchdog is still the backstop).
             self.logger.debug("pre-flight horizon check skipped", exc_info=True)
 
         self.mark_goto_status_as_start()
-
         self.logger.info(
             "%s: going to target... %s %s %s",
             self.device_name,

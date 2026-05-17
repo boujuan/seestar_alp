@@ -555,6 +555,165 @@ def sun_safety_is_locked_out() -> bool:
     return bool(m is not None and m.is_locked_out())
 
 
+# ============================================================
+# Pre-flight goto guard (added on the integration branch)
+# ============================================================
+#
+# Module-level toggle independent of the reactive SunSafetyMonitor's
+# own .enabled instance flag. The front-end's /api/sun_safety/toggle
+# endpoint updates BOTH so the bottom-right pill controls everything
+# in lock-step.
+
+_pre_flight_lock = threading.Lock()
+_pre_flight_enabled = True
+
+
+def is_pre_flight_enabled() -> bool:
+    with _pre_flight_lock:
+        return _pre_flight_enabled
+
+
+def set_pre_flight_enabled(value: bool) -> None:
+    global _pre_flight_enabled
+    with _pre_flight_lock:
+        _pre_flight_enabled = bool(value)
+
+
+def radec_to_topocentric_altaz(
+    ra_hours: float,
+    dec_deg: float,
+    *,
+    lat_deg: Optional[float] = None,
+    lon_deg: Optional[float] = None,
+    when: Optional[datetime] = None,
+) -> tuple[float, float]:
+    """Convert (RA hours, Dec degrees) to topocentric (az, alt) deg via ephem."""
+    site = _site_from_config_or(lat_deg, lon_deg)
+    obs = ephem.Observer()
+    obs.lat = str(site.lat_deg)
+    obs.lon = str(site.lon_deg)
+    if when is None:
+        when = datetime.now(tz=timezone.utc)
+    elif when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    obs.date = when.astimezone(timezone.utc).replace(tzinfo=None)
+    body = ephem.FixedBody()
+    body._ra = ephem.hours(ra_hours * math.pi / 12.0)
+    body._dec = ephem.degrees(dec_deg * math.pi / 180.0)
+    body._epoch = ephem.J2000
+    body.compute(obs)
+    az_deg = math.degrees(float(body.az)) % 360.0
+    alt_deg = math.degrees(float(body.alt))
+    return az_deg, alt_deg
+
+
+def check_path_crosses_sun(
+    start_az_deg: float,
+    start_el_deg: float,
+    target_az_deg: float,
+    target_el_deg: float,
+    *,
+    lat_deg: Optional[float] = None,
+    lon_deg: Optional[float] = None,
+    when: Optional[datetime] = None,
+    min_separation_deg: float = DEFAULT_MIN_SEPARATION_DEG,
+    alt_threshold_deg: float = DEFAULT_ALT_THRESHOLD_DEG,
+    n_samples: int = 100,
+) -> tuple[bool, float, str]:
+    """Check if the alt-az slew path from start to target enters the sun cone.
+
+    Returns ``(crosses, min_sep_deg, reason)``. Az is interpolated along
+    the shorter arc (handles 0 / 360 wrap).
+    """
+    sun_az, sun_alt = compute_sun_altaz(
+        lat_deg=lat_deg, lon_deg=lon_deg, when=when,
+    )
+    if sun_alt < alt_threshold_deg:
+        return False, 180.0, ""
+
+    daz = ((target_az_deg - start_az_deg + 540.0) % 360.0) - 180.0
+    dalt = target_el_deg - start_el_deg
+
+    min_sep = 180.0
+    worst_az = start_az_deg
+    worst_el = start_el_deg
+    for i in range(n_samples + 1):
+        t = i / n_samples
+        az = (start_az_deg + t * daz) % 360.0
+        el = start_el_deg + t * dalt
+        sep = angular_separation(az, el, sun_az, sun_alt)
+        if sep < min_sep:
+            min_sep = sep
+            worst_az = az
+            worst_el = el
+
+    if min_sep < min_separation_deg:
+        return True, min_sep, (
+            f"sun_avoidance: slew path passes {min_sep:.1f} deg from sun "
+            f"(cone {min_separation_deg:.1f} deg; "
+            f"sun az {sun_az:.1f} deg alt {sun_alt:.1f} deg; "
+            f"closest point az {worst_az:.1f} deg el {worst_el:.1f} deg)"
+        )
+    return False, min_sep, ""
+
+
+def evaluate_goto_safety(
+    target_ra_hours: float,
+    target_dec_deg: float,
+    *,
+    start_az_deg: Optional[float] = None,
+    start_el_deg: Optional[float] = None,
+    lat_deg: Optional[float] = None,
+    lon_deg: Optional[float] = None,
+    when: Optional[datetime] = None,
+    min_separation_deg: float = DEFAULT_MIN_SEPARATION_DEG,
+    alt_threshold_deg: float = DEFAULT_ALT_THRESHOLD_DEG,
+) -> dict:
+    """High-level pre-flight evaluation used by the goto guard."""
+    target_az, target_alt = radec_to_topocentric_altaz(
+        target_ra_hours, target_dec_deg,
+        lat_deg=lat_deg, lon_deg=lon_deg, when=when,
+    )
+    sun_az, sun_alt = compute_sun_altaz(
+        lat_deg=lat_deg, lon_deg=lon_deg, when=when,
+    )
+    result = {
+        "safe": True,
+        "reason": "",
+        "target_az_deg": target_az,
+        "target_alt_deg": target_alt,
+        "sun_az_deg": sun_az,
+        "sun_alt_deg": sun_alt,
+        "min_path_sep_deg": None,
+    }
+    if sun_alt < alt_threshold_deg:
+        return result
+
+    target_safe, target_reason = is_sun_safe(
+        target_az, target_alt,
+        lat_deg=lat_deg, lon_deg=lon_deg, when=when,
+        min_separation_deg=min_separation_deg,
+        alt_threshold_deg=alt_threshold_deg,
+    )
+    if not target_safe:
+        result["safe"] = False
+        result["reason"] = target_reason
+        return result
+
+    if start_az_deg is not None and start_el_deg is not None:
+        crosses, min_sep, path_reason = check_path_crosses_sun(
+            start_az_deg, start_el_deg, target_az, target_alt,
+            lat_deg=lat_deg, lon_deg=lon_deg, when=when,
+            min_separation_deg=min_separation_deg,
+            alt_threshold_deg=alt_threshold_deg,
+        )
+        result["min_path_sep_deg"] = min_sep
+        if crosses:
+            result["safe"] = False
+            result["reason"] = path_reason
+    return result
+
+
 __all__ = [
     "DEFAULT_ALT_THRESHOLD_DEG",
     "DEFAULT_MIN_SEPARATION_DEG",
@@ -564,10 +723,15 @@ __all__ = [
     "SunSafetyLocked",
     "SunSafetyMonitor",
     "angular_separation",
+    "check_path_crosses_sun",
     "compute_jog_angle",
     "compute_sun_altaz",
+    "evaluate_goto_safety",
     "get_sun_monitor",
+    "is_pre_flight_enabled",
     "is_sun_safe",
+    "radec_to_topocentric_altaz",
+    "set_pre_flight_enabled",
     "set_sun_monitor",
     "sun_safety_is_locked_out",
 ]
