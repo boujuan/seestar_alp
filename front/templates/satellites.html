@@ -49,6 +49,7 @@
     .sat-row.in-progress { background: rgba(34, 197, 94, 0.18); }
     .sat-row.pinned td:first-child { border-left: 3px solid #f59e0b; }
     .pass-name { font-weight: 600; }
+    .pass-name.priority { color: #38bdf8; }              /* sky-blue: ISS / Tianhe / HST always stand out */
     .pass-name.pinned::before { content: "\2605 "; color: #f59e0b; }
     .pass-name.in-progress::after { content: " \25CF LIVE"; color: #16a34a; font-size: 0.8rem; font-weight: 700; }
     .pass-meta { font-size: 0.85rem; opacity: 0.85; }
@@ -134,7 +135,11 @@
                 html += '<th>' + escapeHtml(c.label) + '</th>';
             } else {
                 var indicator = _sortKey === c.key ? (_sortAsc ? " &uarr;" : " &darr;") : "";
-                html += '<th style="cursor:pointer; user-select:none" onclick="window.__satSort(' + JSON.stringify(c.key) + ')">' + escapeHtml(c.label) + indicator + '</th>';
+                // c.key is a safe alphanumeric identifier (snake_case),
+                // so single-quote inline JS is fine; avoids JSON-stringify
+                // double-quote conflicts inside the HTML attribute.
+                html += '<th data-sort-key="' + escapeHtml(c.key) + '" style="cursor:pointer; user-select:none">'
+                     + escapeHtml(c.label) + indicator + '</th>';
             }
         });
         html += '</tr></thead><tbody>';
@@ -153,7 +158,12 @@
                 // Distinguish fixable (cable-wrap only — pre-position the
                 // mount before track) from real infeasibility.
                 if (p.cable_wrap_only) {
-                    notesHtml = '<span class="badge bg-warning text-dark" title="Cable-wrap range will be exceeded from cum_az=0 start. Pre-positioning the mount before track will fix this.">cable wrap</span> ' + notesHtml;
+                    notesHtml = '<span class="badge bg-warning text-dark" '
+                              + 'title="The cable-wrap range will be exceeded if the mount starts at cum_az=0. '
+                              + 'Pre-positioning the mount to the optimal cum_az before the track starts fixes this. '
+                              + 'Phase 4 will automate the pre-position step; for now, you may need to manually park '
+                              + 'the mount to a CW or CCW position before clicking Track.">'
+                              + 'cable wrap &mdash; pre-position required</span> ' + notesHtml;
                 } else {
                     notesHtml = '<span class="badge bg-danger">infeasible</span> ' + notesHtml;
                 }
@@ -164,8 +174,11 @@
                  +  ' data-start-unix="' + p.start_unix + '" data-end-unix="' + (p.end_unix || 0) + '"'
                  +  ' style="cursor:pointer" '
                  +  ' onclick="window.__satToggleRow(event,' + JSON.stringify(rowKey).replace(/"/g, "&quot;") + ')">'
-                 +  '<td><span class="pass-name' + (p.tle_pinned ? ' pinned' : '') + (p.is_in_progress ? ' in-progress' : '') + '">'
-                 +    escapeHtml(p.name) + '</span></td>'
+                 +  '<td><span class="pass-name'
+                 +    (p.tle_pinned ? ' pinned' : '')
+                 +    (p.is_in_progress ? ' in-progress' : '')
+                 +    (/(ISS|TIANHE|CSS|TIANGONG|HST)/i.test(p.name) ? ' priority' : '')
+                 +    '">' + escapeHtml(p.name) + '</span></td>'
                  +  '<td>' + startDate.toLocaleString() + '</td>'
                  +  '<td class="countdown" data-start-unix="' + p.start_unix + '">' + fmtCountdown(p.seconds_to_start) + '</td>'
                  +  '<td>' + Math.round(p.duration_s) + ' s</td>'
@@ -231,11 +244,28 @@
                     holder.innerHTML = '<div class="text-muted">No path data.</div>';
                     return;
                 }
+                // Stash the data on the holder so the 1Hz ticker can
+                // re-render the live position dot without re-fetching.
+                holder.__skyplotData = data;
                 holder.innerHTML = svgSkyPlot(data);
             })
             .catch(function (err) {
                 holder.innerHTML = '<div class="text-danger">sky-plot failed: ' + escapeHtml(String(err)) + '</div>';
             });
+    }
+
+    function refreshLiveSkyPlots() {
+        // Re-render the SVG for any expanded sky-plot whose pass is
+        // currently in progress (live NOW dot moves along the track).
+        var nowSec = Date.now() / 1000;
+        document.querySelectorAll('[id^="skyplot-"]').forEach(function (holder) {
+            var d = holder.__skyplotData;
+            if (!d || !d.points || !d.points.length) return;
+            var firstT = d.points[0].t, lastT = d.points[d.points.length - 1].t;
+            if (nowSec >= firstT && nowSec <= lastT) {
+                holder.innerHTML = svgSkyPlot(d);
+            }
+        });
     }
 
     function svgSkyPlot(data) {
@@ -252,20 +282,37 @@
         }).join(" ");
         var startP = project(data.points[0].az, data.points[0].el);
         var endP = project(data.points[data.points.length - 1].az, data.points[data.points.length - 1].el);
-        // Find peak (highest el) for label
         var peak = data.points.reduce(function (a, b) { return b.el > a.el ? b : a; }, data.points[0]);
         var peakP = project(peak.az, peak.el);
-        // Compass markers
+        // Live position dot: if pass is currently in progress, find the
+        // sample closest to "now" and draw a bright marker there.
+        var nowSec = Date.now() / 1000;
+        var firstT = data.points[0].t;
+        var lastT = data.points[data.points.length - 1].t;
+        var livePosSvg = "";
+        if (nowSec >= firstT && nowSec <= lastT) {
+            // Find closest sample
+            var closest = data.points[0];
+            var bestDt = Math.abs(closest.t - nowSec);
+            for (var i = 1; i < data.points.length; i++) {
+                var dt = Math.abs(data.points[i].t - nowSec);
+                if (dt < bestDt) { bestDt = dt; closest = data.points[i]; }
+            }
+            var liveP = project(closest.az, closest.el);
+            livePosSvg =
+                '<circle cx="' + liveP.x + '" cy="' + liveP.y + '" r="7" fill="none" stroke="#facc15" stroke-width="2.5">'
+              +   '<animate attributeName="r" values="7;12;7" dur="1.4s" repeatCount="indefinite"/>'
+              + '</circle>'
+              + '<circle cx="' + liveP.x + '" cy="' + liveP.y + '" r="3" fill="#facc15"/>'
+              + '<text x="' + (liveP.x + 10) + '" y="' + (liveP.y - 8) + '" fill="#facc15" font-size="11" font-weight="bold">NOW</text>';
+        }
         var compass = "";
         ["N", "E", "S", "W"].forEach(function (d, i) {
             var az = i * 90;
-            var p = project(az, 0);
-            // Place label just outside the circle
             var theta = (az - 90) * Math.PI / 180;
             var lx = cx + (R + 8) * Math.cos(theta), ly = cy + (R + 8) * Math.sin(theta);
             compass += '<text x="' + lx + '" y="' + (ly + 4) + '" text-anchor="middle" fill="#9ca3af" font-size="11">' + d + '</text>';
         });
-        // Elevation circles 30/60
         var elCircles = "";
         [30, 60].forEach(function (e) {
             var rr = (90 - e) / 95 * R;
@@ -283,6 +330,7 @@
              + '<text x="' + (peakP.x + 6) + '" y="' + (peakP.y + 4) + '" fill="#fbbf24" font-size="10">peak</text>'
              + '<circle cx="' + endP.x + '" cy="' + endP.y + '" r="4" fill="#ef4444"/>'
              + '<text x="' + (endP.x + 6) + '" y="' + (endP.y + 4) + '" fill="#fca5a5" font-size="10">end</text>'
+             + livePosSvg
              + '<text x="6" y="14" fill="#9ca3af" font-size="10">' + (data.n_samples || 0) + ' samples</text>'
              + '</svg>';
     }
@@ -316,6 +364,15 @@
             _priorityOnly = ev.target.checked;
             localStorage.setItem("sat.priorityOnly", String(_priorityOnly));
             renderTable(null);
+        }
+    });
+
+    // Delegated click handler for sortable column headers — robust to
+    // re-renders and avoids inline-onclick attribute escaping issues.
+    document.addEventListener("click", function (ev) {
+        var th = ev.target.closest && ev.target.closest("th[data-sort-key]");
+        if (th) {
+            window.__satSort(th.getAttribute("data-sort-key"));
         }
     });
 
@@ -467,16 +524,28 @@
     }
 
     window.__satTrack = function (filePath, passName) {
+        // Look up the row to check cable_wrap_only flag
+        var passData = _passes.find(function (p) { return p.path === filePath; });
+        var cableWarn = "";
+        if (passData && passData.cable_wrap_only) {
+            cableWarn = "\n\n⚠ This pass has a cable-wrap warning: starting from cum_az=0, the slew exceeds the ±435° usable range. "
+                      + "Phase 4 will automate pre-positioning; for now, you should park the mount to the optimal start "
+                      + "before clicking OK, or accept that the track may stop early when the cable-wrap limit hits.\n\n"
+                      + "Click OK to proceed anyway (track may abort), or Cancel to manually pre-position first.";
+        }
         var ok = confirm(
             "Start tracking " + passName + "?\n\n" +
-            "This will pre-check the pass, wait until start time, then slew the mount to follow it.\n" +
-            "Click OK to start, Cancel to abort."
+            "This will pre-check the pass, wait until start time, then slew the mount to follow it." +
+            cableWarn
         );
         if (!ok) return;
+        // If cable-wrap warning, send skip_precheck=true so the session
+        // doesn't refuse — the user has been warned.
+        var skipPre = !!(passData && passData.cable_wrap_only);
         fetch("/api/satellites/start", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({file: filePath, dry_run: false, skip_precheck: false}),
+            body: JSON.stringify({file: filePath, dry_run: false, skip_precheck: skipPre}),
         }).then(function (r) {
             if (r.status === 409) {
                 alert("Another satellite session is already active. Stop it first.");
@@ -522,9 +591,7 @@
             row.classList.toggle("in-progress", inProgress);
             row.classList.toggle("imminent", imminent);
         });
-        // Also update the 'Last refresh' status text live, derived from
-        // the data-last-refresh attribute that fetchList stamps onto
-        // the refreshStatus element.
+        // Also update the 'Last refresh' status text live.
         var status = document.getElementById("refreshStatus");
         if (status && status.dataset.lastRefresh) {
             var lr = parseFloat(status.dataset.lastRefresh);
@@ -534,6 +601,8 @@
                 status.textContent = pn + " upcoming pass(es). Last refresh " + ago + " s ago.";
             }
         }
+        // Move the NOW dot on any expanded sky-plot of an in-progress pass
+        refreshLiveSkyPlots();
     }
 
     document.addEventListener("DOMContentLoaded", function () {
