@@ -4578,14 +4578,10 @@ class SatellitesCameraPresetResource:
         cam = str(body.get("cam", "main")).lower()
         exposure_us = max(30, int(exposure_ms * 1000))  # firmware min 30µs
 
-        try:
-            # Switch wide_cam setting (False = main/telephoto)
-            method_sync(
-                "set_setting", telescope_id,
-                params={"wide_cam": (cam == "wide")},
-            )
-        except Exception as exc:
-            logger.debug("set wide_cam failed: %s", exc)
+        # NOTE: the Seestar firmware silently ignores set_setting with
+        # `wide_cam` (returns OK but value doesn't change). Camera
+        # selection is a mobile-app-only setting. We accept `cam` from
+        # the body for echo back to the UI but don't try to apply it.
 
         # Enable manual exposure mode + set exp + gain
         try:

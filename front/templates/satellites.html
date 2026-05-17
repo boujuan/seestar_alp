@@ -57,7 +57,8 @@
     </div>
 </div>
 
-<div class="panel-card panel-card-tight no-htmx-fx mb-2">
+<div class="panel-card panel-card-tight no-htmx-fx mb-2"
+     data-imager-root="{{ imager_root }}" id="liveVideoCard">
     <div class="d-flex align-items-center gap-2" style="cursor:pointer" onclick="window.__satToggleLiveVideo()">
         <span id="liveVideoChevron" style="font-size:1.1rem;">&#9656;</span>
         <strong>Live camera</strong>
@@ -72,15 +73,18 @@
                 <img id="liveCamFeed"
                      src=""
                      style="width:100%; max-height:60vh; background:#0a0a0a; border-radius:4px; display:block;"
-                     alt="(stream not started — click Apply ISS preset below)">
+                     alt="(stream not started — click Apply preset below)">
+                <p class="small text-muted mt-1 mb-0">
+                    Live MJPEG from <code>{{ imager_root }}/vid</code>. Camera switch (telephoto vs wide) is <b>not exposed via Alpaca</b> — change it in the Seestar mobile app first if needed.
+                </p>
             </div>
             <div style="flex: 0 0 280px;">
                 <h6 class="mb-2">Imaging preset</h6>
                 <div class="mb-2">
-                    <label class="form-label small mb-0">Camera</label>
-                    <select id="liveCamSelect" class="form-select form-select-sm">
+                    <label class="form-label small mb-0">Camera <span class="text-muted">(switch in mobile app)</span></label>
+                    <select id="liveCamSelect" class="form-select form-select-sm" disabled title="Camera switch is not exposed by the Seestar Alpaca firmware. Change it in the mobile app; this UI reflects whatever is currently active.">
                         <option value="main" selected>Telephoto (main, f/5.33)</option>
-                        <option value="wide">Wide field (f/1.75)</option>
+                        <option value="wide">Wide field (f/1.75) — needs mobile app to switch</option>
                     </select>
                 </div>
                 <div class="mb-2">
@@ -752,9 +756,13 @@
           .then(function (data) {
               document.getElementById("liveCamStatus").textContent =
                   "running — exp " + (data.exposure_us / 1000).toFixed(1) + "ms, gain " + data.gain + ", cam " + data.cam;
-              // Start MJPEG; append a cache-buster so the browser reconnects
+              // Start MJPEG from the imager service (port 7556) — that's
+              // the actual multipart/x-mixed-replace stream. /1/live/video
+              // on the main port is just the HTMX status panel.
+              var card = document.getElementById("liveVideoCard");
+              var imagerRoot = (card && card.dataset.imagerRoot) || "";
               var img = document.getElementById("liveCamFeed");
-              img.src = "/1/live/video?t=" + Date.now();
+              img.src = imagerRoot + "/vid?t=" + Date.now();
           }).catch(function (err) {
               alert("Preset failed: " + err);
           });
