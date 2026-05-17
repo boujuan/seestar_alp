@@ -540,28 +540,29 @@
     }
 
     window.__satTrack = function (filePath, passName) {
-        // Look up the row to check cable_wrap_only flag
         var passData = _passes.find(function (p) { return p.path === filePath; });
         var cableWarn = "";
         if (passData && passData.cable_wrap_only) {
-            cableWarn = "\n\n⚠ This pass has a cable-wrap warning: starting from cum_az=0, the slew exceeds the ±435° usable range. "
-                      + "Phase 4 will automate pre-positioning; for now, you should park the mount to the optimal start "
-                      + "before clicking OK, or accept that the track may stop early when the cable-wrap limit hits.\n\n"
-                      + "Click OK to proceed anyway (track may abort), or Cancel to manually pre-position first.";
+            cableWarn = "\n\nThis pass has a cable-wrap warning: starting from cum_az=0, the slew exceeds the +/-435 deg usable range. "
+                      + "Pre-position the mount before clicking Track, or accept that the track may abort early at the wrap limit.";
         }
-        var ok = confirm(
-            "Start tracking " + passName + "?\n\n" +
-            "This will pre-check the pass, wait until start time, then slew the mount to follow it." +
-            cableWarn
-        );
-        if (!ok) return;
-        // If cable-wrap warning, send skip_precheck=true so the session
-        // doesn't refuse — the user has been warned.
+        var dryRunChoice = window.__satForceDryRun !== undefined
+            ? window.__satForceDryRun
+            : confirm(
+                "DRY RUN? (no motor commands)\n\n" +
+                "OK  = dry-run only — logs decisions, mount stays still. Exercises the whole pipeline safely.\n" +
+                "Cancel = LIVE track — mount actually slews to follow the satellite."
+              );
+        if (dryRunChoice) {
+            if (!confirm("DRY-RUN " + passName + "?\n\nNo motor commands. Click OK to start dry-run." + cableWarn)) return;
+        } else {
+            if (!confirm("LIVE TRACK " + passName + "?\n\nThe mount WILL slew. Make sure cables are clear and nothing is in the way." + cableWarn)) return;
+        }
         var skipPre = !!(passData && passData.cable_wrap_only);
         fetch("/api/satellites/start", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({file: filePath, dry_run: false, skip_precheck: skipPre}),
+            body: JSON.stringify({file: filePath, dry_run: dryRunChoice, skip_precheck: skipPre}),
         }).then(function (r) {
             if (r.status === 409) {
                 alert("Another satellite session is already active. Stop it first.");
