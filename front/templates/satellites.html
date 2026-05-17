@@ -93,7 +93,8 @@
         {key: "countdown",       label: "Countdown",     get: function (p) { return p.seconds_to_start != null ? p.seconds_to_start : 1e18; }},
         {key: "duration_s",      label: "Duration",      get: function (p) { return p.duration_s; }},
         {key: "peak_el_deg",     label: "Peak el",       get: function (p) { return p.peak_el_deg; }},
-        {key: "peak_rate",       label: "Peak rate",     get: function (p) { return Math.max(p.peak_v_az_degs || 0, p.peak_v_el_degs || 0); }},
+        {key: "peak_rate",       label: "Peak rate",     get: function (p) { return Math.max(p.peak_v_az_degs || 0, p.peak_v_el_degs || 0); },
+            headerTitle: "Per-tick angular rate from pre-check (spline-derived from ECEF samples). Unreliable for near-zenith passes (peak_el > 75°) where the spline smooths over the singularity — see the 'near zenith' badge for those. Mount cap is 6 °/s."},
         {key: "peak_visible_mag", label: "Mag",          get: function (p) { return p.peak_visible_mag != null ? p.peak_visible_mag : 999; }},
         {key: "score",           label: "Score",         get: function (p) { return p.score; }},
         {key: "notes",           label: "Notes",         get: function () { return 0; }, nosort: true},
@@ -131,14 +132,12 @@
         }
         var html = '<table class="table table-hover align-middle mb-0"><thead><tr>';
         COLUMNS.forEach(function (c) {
+            var titleAttr = c.headerTitle ? ' title="' + escapeHtml(c.headerTitle) + '"' : '';
             if (c.nosort) {
-                html += '<th>' + escapeHtml(c.label) + '</th>';
+                html += '<th' + titleAttr + '>' + escapeHtml(c.label) + '</th>';
             } else {
                 var indicator = _sortKey === c.key ? (_sortAsc ? " &uarr;" : " &darr;") : "";
-                // c.key is a safe alphanumeric identifier (snake_case),
-                // so single-quote inline JS is fine; avoids JSON-stringify
-                // double-quote conflicts inside the HTML attribute.
-                html += '<th data-sort-key="' + escapeHtml(c.key) + '" style="cursor:pointer; user-select:none">'
+                html += '<th data-sort-key="' + escapeHtml(c.key) + '" style="cursor:pointer; user-select:none"' + titleAttr + '>'
                      + escapeHtml(c.label) + indicator + '</th>';
             }
         });
@@ -155,20 +154,21 @@
                 return '<span class="badge bg-warning text-dark me-1">' + escapeHtml(n) + '</span>';
             }).join("");
             if (p.near_zenith) {
-                // The alt-az singularity: az-rate diverges as the
-                // satellite approaches zenith. A pass culminating
-                // above ~75° with sky-rate > 80% of mount cap is
-                // doomed to az saturation near peak. We label this
-                // SEPARATELY from generic infeasibility because the
-                // failure mode and remedy are different — the only
-                // remedy is to skip the pass or accept lost-frames
-                // for ~10-20 s at culmination.
+                // peak_el > 78° heuristic — at this elevation the true
+                // peak az-rate (analytically: v_sky / sin(90-peak_el))
+                // exceeds the mount cap of 6°/s even for ISS-rate
+                // targets. The displayed peak_rate in the table is
+                // spline-derived per-tick and is UNRELIABLE here — it
+                // smooths over the singularity. The displayed value
+                // is typically 0.01-0.1°/s for these passes despite
+                // the real rate being 6+°/s for ~10s at culmination.
                 notesHtml = '<span class="badge bg-danger" '
-                          + 'title="Peak elevation > 75° combined with az-rate near mount cap (6 °/s). '
-                          + 'The alt-az singularity at zenith makes the required azimuth rate diverge as '
-                          + 'the satellite approaches the zenith. The mount WILL saturate for several seconds '
-                          + 'near culmination — the satellite will drift off-frame and may not be reacquired. '
-                          + 'This is a fundamental limitation of alt-az mounts, not a software bug.">'
+                          + 'title="Peak elevation > 78°. Kinematically, the required azimuth rate at culmination is '
+                          + 'approximately v_sky / sin(90° − peak_el), which exceeds the mount cap of 6 °/s for any '
+                          + 'pass above 78° (for ISS-rate targets). The mount WILL saturate for several seconds near '
+                          + 'culmination — sat drifts off-frame and may not be reacquired. The displayed Peak Rate '
+                          + 'is spline-smoothed per-tick and is unreliable for these passes. This is a fundamental '
+                          + 'limitation of alt-az mounts, not a software bug.">'
                           + 'near zenith &mdash; alt-az singularity</span> ' + notesHtml;
             } else if (!p.feasible) {
                 // Distinguish fixable (cable-wrap only — pre-position
