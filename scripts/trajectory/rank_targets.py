@@ -39,6 +39,8 @@ DEFAULT_DIR = Path("data/trajectories/satellites")
 class TargetReport:
     path: Path
     name: str
+    start_unix: float
+    end_unix: float
     duration_s: float
     peak_el_deg: float
     peak_v_az_degs: float
@@ -113,8 +115,11 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
             f"replay saturation: az={sim.az_sat_count} el={sim.el_sat_count}"
         )
 
+    t_start, t_end = provider.valid_range()
     return TargetReport(
-        path=path, name=str(name), duration_s=duration_s,
+        path=path, name=str(name),
+        start_unix=float(t_start), end_unix=float(t_end),
+        duration_s=duration_s,
         peak_el_deg=peak_el_deg,
         peak_v_az_degs=pre.peak_v_az_degs,
         peak_v_el_degs=pre.peak_v_el_degs,
@@ -132,6 +137,66 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
     )
 
 
+def rank_and_index(
+    directory: Path | None = None,
+    *,
+    json_out: Path | None = None,
+) -> list[TargetReport]:
+    """Rank every *.jsonl pass in ``directory``, optionally write a
+    JSON index file consumable by the web UI.
+
+    Returns the sorted list of TargetReport (highest score first).
+    Empty list = no JSONL files found OR all failed to evaluate.
+
+    If ``json_out`` is given, writes a JSON file with the same shape
+    as the CLI ``--json`` flag. The web UI reads this file via
+    ``/api/satellites/list``.
+    """
+    if directory is None:
+        directory = DEFAULT_DIR
+    jsonl_paths = sorted(p for p in directory.glob("*.jsonl") if not p.name.startswith("_"))
+    if not jsonl_paths:
+        return []
+    mount_frame = MountFrame.from_identity_enu()
+
+    reports: list[TargetReport] = []
+    for p in jsonl_paths:
+        try:
+            reports.append(_evaluate(p, mount_frame))
+        except Exception as exc:
+            print(f"[skip] {p.name}: {exc}")
+    reports.sort(key=lambda r: -r.score)
+
+    if json_out is not None:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        with json_out.open("w", encoding="utf-8") as f:
+            json.dump([_report_to_dict(r) for r in reports], f, indent=2)
+
+    return reports
+
+
+def _report_to_dict(r: TargetReport) -> dict:
+    return {
+        "path": str(r.path),
+        "name": r.name,
+        "start_unix": r.start_unix,
+        "end_unix": r.end_unix,
+        "duration_s": r.duration_s,
+        "peak_el_deg": r.peak_el_deg,
+        "peak_v_az_degs": r.peak_v_az_degs,
+        "peak_v_el_degs": r.peak_v_el_degs,
+        "az_err_rms": r.az_err_rms,
+        "el_err_rms": r.el_err_rms,
+        "cable_violations": r.cable_violations,
+        "el_violations": r.el_violations,
+        "v_saturation_ticks": r.v_sat_ticks,
+        "feasible": r.feasible,
+        "tle_pinned": r.tle_pinned,
+        "score": r.score,
+        "notes": r.notes,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -144,23 +209,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Optional path to write structured ranking JSON")
     args = parser.parse_args(argv)
 
-    jsonl_paths = sorted(args.dir.glob("*.jsonl"))
-    if not jsonl_paths:
-        print(f"no JSONL files found in {args.dir}")
-        return 2
-    mount_frame = MountFrame.from_identity_enu()
-
-    reports: list[TargetReport] = []
-    for p in jsonl_paths:
-        try:
-            reports.append(_evaluate(p, mount_frame))
-        except Exception as exc:
-            print(f"[skip] {p.name}: {exc}")
+    reports = rank_and_index(args.dir, json_out=args.json)
     if not reports:
-        print("no targets could be evaluated")
+        print(f"no JSONL files found / evaluated in {args.dir}")
         return 2
-
-    reports.sort(key=lambda r: -r.score)
 
     print(f"\n{'─'*120}")
     print(f"Ranked targets ({len(reports)} total, top {args.top} shown):")
@@ -179,22 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {marker} {r.name:<30} score={r.score:>7.2f}  file={r.path.name}")
 
     if args.json is not None:
-        args.json.parent.mkdir(parents=True, exist_ok=True)
-        with args.json.open("w", encoding="utf-8") as f:
-            json.dump([{
-                "path": str(r.path), "name": r.name,
-                "duration_s": r.duration_s, "peak_el_deg": r.peak_el_deg,
-                "peak_v_az_degs": r.peak_v_az_degs,
-                "peak_v_el_degs": r.peak_v_el_degs,
-                "az_err_rms": r.az_err_rms, "el_err_rms": r.el_err_rms,
-                "cable_violations": r.cable_violations,
-                "el_violations": r.el_violations,
-                "v_saturation_ticks": r.v_sat_ticks,
-                "feasible": r.feasible, "tle_pinned": r.tle_pinned,
-                "score": r.score, "notes": r.notes,
-            } for r in reports], f, indent=2)
         print(f"\n→ wrote ranking to {args.json}")
-
     return 0
 
 

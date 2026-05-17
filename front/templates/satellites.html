@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}Satellites{% endblock %}
+
+{% block content %}
+<div class="page-hero">
+    <div>
+        <p class="page-kicker">Live tracking</p>
+        <h1 class="page-title">Satellite passes</h1>
+        <p class="page-subtitle">
+            Upcoming ISS, Tiangong, Starlink and bright-object passes from your site.
+            Refresh queries CelesTrak (visual + stations), filters for feasible passes
+            (20-80&deg; peak elevation, &ge;240 s), and ranks for tracking quality.
+        </p>
+    </div>
+    <div class="d-flex flex-column align-items-end gap-2">
+        <button id="refreshBtn" type="button" class="btn btn-primary"
+                onclick="window.__satRefresh()">Refresh passes</button>
+        <span id="refreshStatus" class="small text-muted">&nbsp;</span>
+    </div>
+</div>
+
+<div class="panel-card no-htmx-fx">
+    <div id="satellitesTable">
+        <div class="empty-state">Loading passes...</div>
+    </div>
+</div>
+
+<style>
+    .sat-row td { vertical-align: middle; }
+    .sat-row.imminent { background: rgba(217, 119, 6, 0.18); }
+    .sat-row.in-progress { background: rgba(34, 197, 94, 0.18); }
+    .sat-row.pinned td:first-child { border-left: 3px solid #f59e0b; }
+    .pass-name { font-weight: 600; }
+    .pass-name.pinned::before { content: "\2605 "; color: #f59e0b; }
+    .pass-name.in-progress::after { content: " \25CF LIVE"; color: #16a34a; font-size: 0.8rem; font-weight: 700; }
+    .pass-meta { font-size: 0.85rem; opacity: 0.85; }
+    .pass-warn { color: #f59e0b; }
+    .pass-bad  { color: #ef4444; }
+    .countdown { font-variant-numeric: tabular-nums; }
+    .empty-state { padding: 2rem; text-align: center; opacity: 0.7; }
+</style>
+
+<script>
+(function () {
+    var REFRESH_POLL_MS = 1000;   // poll list endpoint while refresh is in flight
+    var IDLE_POLL_MS = 15000;     // re-fetch list every 15s when idle
+    var _pollTimer = null;
+    var _wasRunning = false;
+
+    function fmtCountdown(secs) {
+        if (secs == null) return "-";
+        var s = Math.round(secs);
+        var sign = s < 0 ? "-" : "+";
+        s = Math.abs(s);
+        var h = Math.floor(s / 3600);
+        var m = Math.floor((s % 3600) / 60);
+        var ss = s % 60;
+        if (h > 0) return sign + h + "h" + (m < 10 ? "0" : "") + m + "m";
+        if (m > 0) return sign + m + "m" + (ss < 10 ? "0" : "") + ss + "s";
+        return sign + ss + "s";
+    }
+
+    function renderTable(data) {
+        var el = document.getElementById("satellitesTable");
+        if (!el) return;
+        var html = "";
+        if (!data.passes || !data.passes.length) {
+            html = '<div class="empty-state">No passes loaded. Click <b>Refresh passes</b> to fetch the next 48 hours from CelesTrak.</div>';
+        } else {
+            html = '<table class="table table-hover align-middle mb-0"><thead><tr>'
+                +  '<th>Pass</th>'
+                +  '<th>Start (local)</th>'
+                +  '<th>Countdown</th>'
+                +  '<th>Duration</th>'
+                +  '<th>Peak el</th>'
+                +  '<th>Peak rate</th>'
+                +  '<th>Score</th>'
+                +  '<th>Notes</th>'
+                +  '<th></th>'
+                +  '</tr></thead><tbody>';
+            data.passes.forEach(function (p) {
+                var imminent = p.is_imminent ? " imminent" : "";
+                var live = p.is_in_progress ? " in-progress" : "";
+                var pinClass = p.tle_pinned ? " pinned" : "";
+                var startDate = new Date(p.start_unix * 1000);
+                var rate = Math.max(p.peak_v_az_degs || 0, p.peak_v_el_degs || 0);
+                var rateClass = rate > 5.5 ? "pass-bad" : (rate > 3 ? "pass-warn" : "");
+                var elClass = p.peak_el_deg > 80 ? "pass-bad" : (p.peak_el_deg > 70 ? "pass-warn" : "");
+                var notesHtml = (p.notes || []).map(function (n) {
+                    return '<span class="badge bg-warning text-dark me-1">' + escapeHtml(n) + '</span>';
+                }).join("");
+                if (!p.feasible) notesHtml = '<span class="badge bg-danger">infeasible</span> ' + notesHtml;
+                html += '<tr class="sat-row' + imminent + live + pinClass + '">'
+                     +  '<td><span class="pass-name' + (p.tle_pinned ? ' pinned' : '') + (p.is_in_progress ? ' in-progress' : '') + '">'
+                     +    escapeHtml(p.name) + '</span></td>'
+                     +  '<td>' + startDate.toLocaleString() + '</td>'
+                     +  '<td class="countdown">' + fmtCountdown(p.seconds_to_start) + '</td>'
+                     +  '<td>' + Math.round(p.duration_s) + ' s</td>'
+                     +  '<td class="' + elClass + '">' + p.peak_el_deg.toFixed(1) + '&deg;</td>'
+                     +  '<td class="' + rateClass + '">' + rate.toFixed(2) + ' &deg;/s</td>'
+                     +  '<td>' + p.score.toFixed(0) + '</td>'
+                     +  '<td>' + notesHtml + '</td>'
+                     +  '<td><button type="button" class="btn btn-sm btn-outline-primary" '
+                     +    'disabled title="Phase 2 — not yet wired up">Track</button></td>'
+                     +  '</tr>';
+            });
+            html += '</tbody></table>';
+        }
+        el.innerHTML = html;
+    }
+
+    function escapeHtml(s) {
+        if (s == null) return "";
+        return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    function updateRefreshStatus(state, passCount) {
+        var btn = document.getElementById("refreshBtn");
+        var status = document.getElementById("refreshStatus");
+        if (!btn || !status) return;
+        if (state.running) {
+            btn.disabled = true;
+            btn.textContent = "Refreshing...";
+            status.textContent = "Querying CelesTrak + ranking passes...";
+        } else {
+            btn.disabled = false;
+            btn.textContent = "Refresh passes";
+            if (state.last_error) {
+                status.innerHTML = '<span class="pass-bad">Last refresh failed: ' + escapeHtml(state.last_error) + '</span>';
+            } else if (state.finished_unix) {
+                var ago = Math.round((Date.now() / 1000) - state.finished_unix);
+                status.textContent = passCount + " upcoming pass(es). Last refresh " + ago + " s ago.";
+            } else {
+                status.textContent = passCount + " upcoming pass(es).";
+            }
+        }
+    }
+
+    function fetchList() {
+        return fetch("/api/satellites/list")
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                renderTable(data);
+                var state = data.refresh || {};
+                updateRefreshStatus(state, (data.passes || []).length);
+
+                // If a refresh just finished, slow polling back down
+                if (_wasRunning && !state.running) {
+                    schedulePoll(IDLE_POLL_MS);
+                } else if (state.running) {
+                    schedulePoll(REFRESH_POLL_MS);
+                } else {
+                    schedulePoll(IDLE_POLL_MS);
+                }
+                _wasRunning = !!state.running;
+            })
+            .catch(function () { schedulePoll(IDLE_POLL_MS); });
+    }
+
+    function schedulePoll(ms) {
+        if (_pollTimer !== null) clearTimeout(_pollTimer);
+        _pollTimer = setTimeout(fetchList, ms);
+    }
+
+    window.__satRefresh = function () {
+        fetch("/api/satellites/refresh", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({hours: 48, top_n: 10}),
+        }).then(function () { fetchList(); });
+    };
+
+    document.addEventListener("DOMContentLoaded", fetchList);
+})();
+</script>
+{% endblock %}

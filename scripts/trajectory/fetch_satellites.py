@@ -200,17 +200,24 @@ def export_pass(
     return path
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hours", type=float, default=24.0,
-                        help="look-ahead window starting now (UTC)")
-    parser.add_argument(
-        "--out-dir", type=Path, default=Path("data/trajectories/satellites"),
-    )
-    parser.add_argument("--top-n", type=int, default=5,
-                        help="max passes to export, ranked by culm elevation")
-    parser.add_argument("--sample-hz", type=float, default=2.0)
-    args = parser.parse_args(argv)
+def fetch_and_export(
+    *,
+    hours: float = 24.0,
+    top_n: int = 5,
+    sample_hz: float = 2.0,
+    out_dir: Path | None = None,
+) -> list[Path]:
+    """Find upcoming passes and export top-N to JSONL files.
+
+    Returns the list of paths written. Empty list means no passes
+    matched the filter. Caller is responsible for any cleanup of stale
+    files in ``out_dir``.
+
+    Same logic as the CLI ``main()``, factored out so the web UI's
+    refresh endpoint can call it from a background thread.
+    """
+    if out_dir is None:
+        out_dir = Path("data/trajectories/satellites")
 
     site = build_site()
     load = _loader()
@@ -218,8 +225,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sats = load_tles(load)
     if not sats:
-        print("[fetch_satellites] no satellites loaded, aborting", file=sys.stderr)
-        return 2
+        print("[fetch_satellites] no satellites loaded, aborting",
+              file=sys.stderr)
+        return []
 
     observer = wgs84.latlon(
         latitude_degrees=site.lat_deg,
@@ -230,9 +238,9 @@ def main(argv: list[str] | None = None) -> int:
     now = time.time()
     t0 = ts.from_datetime(datetime.fromtimestamp(now, tz=timezone.utc))
     t1 = ts.from_datetime(
-        datetime.fromtimestamp(now + args.hours * 3600.0, tz=timezone.utc)
+        datetime.fromtimestamp(now + hours * 3600.0, tz=timezone.utc)
     )
-    print(f"[fetch_satellites] scanning {len(sats)} sats over {args.hours} h",
+    print(f"[fetch_satellites] scanning {len(sats)} sats over {hours} h",
           file=sys.stderr)
 
     candidates: list[tuple[Pass, object]] = []
@@ -248,9 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[fetch_satellites] {len(candidates)} candidate passes match filter",
           file=sys.stderr)
 
-    # Rank by culmination elevation descending (more interesting test cases),
-    # but bias toward variety: dedupe by satellite name so we don't dump 5 ISS
-    # passes.
+    # Rank by culmination elevation descending, dedupe by satellite name.
     candidates.sort(key=lambda pair: -pair[0].culm_el_deg)
     picked: list[tuple[Pass, object]] = []
     seen_names: set[str] = set()
@@ -259,16 +265,38 @@ def main(argv: list[str] | None = None) -> int:
             continue
         seen_names.add(p.satellite_name)
         picked.append((p, sat))
-        if len(picked) >= args.top_n:
+        if len(picked) >= top_n:
             break
 
-    exported = 0
+    written: list[Path] = []
     for p, sat in picked:
-        if export_pass(p, sat, site, load, args.out_dir, args.sample_hz):
-            exported += 1
-    print(f"[fetch_satellites] exported {exported} pass(es) to {args.out_dir}",
+        path = export_pass(p, sat, site, load, out_dir, sample_hz)
+        if path is not None:
+            written.append(path)
+    print(f"[fetch_satellites] exported {len(written)} pass(es) to {out_dir}",
           file=sys.stderr)
-    return 0 if exported > 0 else 2
+    return written
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--hours", type=float, default=24.0,
+                        help="look-ahead window starting now (UTC)")
+    parser.add_argument(
+        "--out-dir", type=Path, default=Path("data/trajectories/satellites"),
+    )
+    parser.add_argument("--top-n", type=int, default=5,
+                        help="max passes to export, ranked by culm elevation")
+    parser.add_argument("--sample-hz", type=float, default=2.0)
+    args = parser.parse_args(argv)
+
+    written = fetch_and_export(
+        hours=args.hours,
+        top_n=args.top_n,
+        sample_hz=args.sample_hz,
+        out_dir=args.out_dir,
+    )
+    return 0 if written else 2
 
 
 if __name__ == "__main__":

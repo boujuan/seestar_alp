@@ -4305,6 +4305,171 @@ class VelocityControllerLogResource:
         resp.text = json.dumps(payload)
 
 
+# ---------- Satellite pass listing (Phase 1) -------------------------
+#
+# UI for browsing upcoming ISS / Tiangong / Starlink passes computed by
+# scripts/trajectory/fetch_satellites. Refresh runs the fetch + rank in
+# a background thread and rewrites _index.json; the page polls a list
+# endpoint to render the table.
+
+_SATELLITES_DIR = Path(__file__).resolve().parents[1] / "data" / "trajectories" / "satellites"
+_SATELLITES_INDEX = _SATELLITES_DIR / "_index.json"
+
+_satellite_refresh_lock = threading.Lock()
+_satellite_refresh_state = {
+    "running": False,
+    "started_unix": None,
+    "finished_unix": None,
+    "last_error": None,
+    "last_n": 0,
+}
+
+
+def _satellites_refresh_status() -> dict:
+    """Snapshot of the refresh worker's status (for the UI spinner)."""
+    with _satellite_refresh_lock:
+        return dict(_satellite_refresh_state)
+
+
+def _satellites_index_payload() -> dict:
+    """Read _index.json and return a UI-friendly payload.
+
+    Adds derived fields ``seconds_to_start`` and ``is_imminent`` so the
+    template can highlight passes starting soon. Stale entries (end_unix
+    in the past) are filtered out.
+    """
+    now = time.time()
+    try:
+        with _SATELLITES_INDEX.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        raw = []
+
+    entries = []
+    for r in raw:
+        end_u = float(r.get("end_unix", 0) or 0)
+        if end_u and end_u < now:
+            continue  # pass already done
+        start_u = float(r.get("start_unix", 0) or 0)
+        secs = start_u - now if start_u else None
+        r["seconds_to_start"] = secs
+        r["is_imminent"] = secs is not None and 0 <= secs <= 600
+        r["is_in_progress"] = secs is not None and secs < 0 and end_u > now
+        entries.append(r)
+    entries.sort(key=lambda r: r.get("start_unix") or 0)
+
+    return {
+        "now_unix": now,
+        "passes": entries,
+        "refresh": _satellites_refresh_status(),
+        "directory": str(_SATELLITES_DIR),
+    }
+
+
+def _satellites_refresh_worker(hours: float, top_n: int) -> None:
+    """Run fetch_and_export then rank_and_index; update shared state."""
+    from scripts.trajectory.fetch_satellites import fetch_and_export
+    from scripts.trajectory.rank_targets import rank_and_index
+
+    with _satellite_refresh_lock:
+        _satellite_refresh_state["running"] = True
+        _satellite_refresh_state["started_unix"] = time.time()
+        _satellite_refresh_state["finished_unix"] = None
+        _satellite_refresh_state["last_error"] = None
+
+    try:
+        _SATELLITES_DIR.mkdir(parents=True, exist_ok=True)
+        # Prune stale files first (passes whose end_unix is in the past)
+        now = time.time()
+        for p in _SATELLITES_DIR.glob("*.jsonl"):
+            try:
+                with p.open("r", encoding="utf-8") as f:
+                    hdr = json.loads(f.readline())
+                # header has 'duration_s' but not start_unix; encode it in filename
+                # _<unix>.jsonl
+                stem = p.stem
+                ts_str = stem.rsplit("_", 1)[-1]
+                start_unix = float(ts_str) if ts_str.isdigit() else 0
+                end_unix = start_unix + float(hdr.get("duration_s", 0))
+                if end_unix and end_unix < now:
+                    p.unlink()
+                    logger.info("satellites refresh: pruned stale %s", p.name)
+            except Exception:
+                logger.debug("could not check %s for staleness", p, exc_info=True)
+
+        fetch_and_export(hours=hours, top_n=top_n, out_dir=_SATELLITES_DIR)
+        rank_and_index(_SATELLITES_DIR, json_out=_SATELLITES_INDEX)
+        with _satellite_refresh_lock:
+            _satellite_refresh_state["last_n"] = len(_satellites_index_payload()["passes"])
+    except Exception as exc:
+        logger.warning("satellites refresh failed: %s", exc, exc_info=True)
+        with _satellite_refresh_lock:
+            _satellite_refresh_state["last_error"] = str(exc)
+    finally:
+        with _satellite_refresh_lock:
+            _satellite_refresh_state["running"] = False
+            _satellite_refresh_state["finished_unix"] = time.time()
+
+
+class SatellitesPageResource:
+    """Serve the /satellites pass-listing page."""
+
+    @staticmethod
+    def on_get(req, resp):
+        payload = _satellites_index_payload()
+        render_template(req, resp, "satellites.html", **payload)
+
+
+class SatellitesListResource:
+    """GET endpoint polled by the page for live updates."""
+
+    @staticmethod
+    def on_get(req, resp):
+        resp.status = falcon.HTTP_200
+        resp.content_type = "application/json"
+        resp.text = json.dumps(_satellites_index_payload(), default=str)
+
+
+class SatellitesRefreshResource:
+    """POST endpoint that kicks off a background fetch+rank refresh.
+
+    Returns 202 immediately with the current refresh state. Re-clicking
+    while a refresh is in progress is a no-op (returns the same state).
+    """
+
+    @staticmethod
+    def on_post(req, resp):
+        try:
+            body = req.media if req.content_length else {}
+        except Exception:
+            body = {}
+        hours = float(body.get("hours", 48.0))
+        top_n = int(body.get("top_n", 10))
+
+        with _satellite_refresh_lock:
+            already_running = _satellite_refresh_state["running"]
+
+        if not already_running:
+            t = threading.Thread(
+                target=_satellites_refresh_worker,
+                args=(hours, top_n),
+                daemon=True,
+                name="satellites-refresh",
+            )
+            t.start()
+            logger.info(
+                "satellites refresh started: hours=%s top_n=%s", hours, top_n,
+            )
+
+        resp.status = falcon.HTTP_202
+        resp.content_type = "application/json"
+        resp.text = json.dumps({
+            "accepted": True,
+            "already_running": already_running,
+            "state": _satellites_refresh_status(),
+        })
+
+
 class LiveTrackerResource:
     """Serve the live plane/satellite tracker page."""
 
@@ -8189,6 +8354,10 @@ class FrontMain:
             "/api/{telescope_id:int}/velocity_controller/log",
             VelocityControllerLogResource(),
         )
+        # ---- Satellite pass listing (global; not per-telescope) ----
+        app.add_route("/satellites", SatellitesPageResource())
+        app.add_route("/api/satellites/list", SatellitesListResource())
+        app.add_route("/api/satellites/refresh", SatellitesRefreshResource())
         app.add_route(
             "/{telescope_id:int}/live_tracker",
             LiveTrackerResource(),
