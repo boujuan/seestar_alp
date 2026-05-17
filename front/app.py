@@ -4555,6 +4555,87 @@ class SatellitesActiveResource:
         resp.text = json.dumps(_satellite_session_payload())
 
 
+class SatellitesCameraPresetResource:
+    """POST: apply ISS-tuned exposure/gain preset to the main (telephoto)
+    camera and ensure View is active so the MJPEG stream produces frames.
+
+    Body: ``{exposure_ms?: float = 5.0, gain?: int = 50,
+              cam?: "main"|"wide" = "main"}``.
+    Defaults are chosen for ISS at ~mag -1.7 with the telephoto lens:
+    5 ms exposure keeps the satellite point-like (it moves ~1 deg/s →
+    18 arcsec smear = 5 px at the telephoto's 3.74"/px scale) and the
+    low gain prevents saturation on a bright ISS.
+    """
+
+    @staticmethod
+    def on_post(req, resp, telescope_id=1):
+        try:
+            body = req.media if req.content_length else {}
+        except Exception:
+            body = {}
+        exposure_ms = float(body.get("exposure_ms", 5.0))
+        gain = int(body.get("gain", 50))
+        cam = str(body.get("cam", "main")).lower()
+        exposure_us = max(30, int(exposure_ms * 1000))  # firmware min 30µs
+
+        try:
+            # Switch wide_cam setting (False = main/telephoto)
+            method_sync(
+                "set_setting", telescope_id,
+                params={"wide_cam": (cam == "wide")},
+            )
+        except Exception as exc:
+            logger.debug("set wide_cam failed: %s", exc)
+
+        # Enable manual exposure mode + set exp + gain
+        try:
+            method_sync(
+                "set_setting", telescope_id,
+                params={
+                    "manual_exp": True,
+                    "isp_exp_ms": exposure_us / 1000.0,
+                    "isp_gain": gain,
+                },
+            )
+        except Exception as exc:
+            logger.debug("set manual exp failed: %s", exc)
+
+        # Update camera exposure directly (the path that the View uses)
+        try:
+            method_sync(
+                "set_camera_exp_and_bin", telescope_id,
+                params={"exposure": exposure_us, "bin": 1},
+            )
+        except Exception as exc:
+            logger.debug("set_camera_exp_and_bin failed: %s", exc)
+
+        # Ensure View is started in star mode so MJPEG produces frames
+        # at the new exposure. If a View is already active, leave alone.
+        try:
+            view_state = method_sync("get_view_state", telescope_id) or {}
+            view = (view_state.get("Value") or {}).get("result", {}).get("View", {})
+            if view.get("state") != "working":
+                method_sync(
+                    "iscope_start_view", telescope_id,
+                    params={"mode": "star"},
+                )
+        except Exception as exc:
+            logger.debug("ensure view active failed: %s", exc)
+
+        logger.info(
+            "satellite camera preset applied: exposure=%dµs gain=%d cam=%s",
+            exposure_us, gain, cam,
+        )
+        resp.status = falcon.HTTP_200
+        resp.content_type = "application/json"
+        resp.text = json.dumps({
+            "ok": True,
+            "exposure_us": exposure_us,
+            "gain": gain,
+            "cam": cam,
+        })
+
+
 class SatellitesPathResource:
     """GET /api/satellites/path?file=<path> — return a downsampled set
     of (t_unix, az, el) points for the sky-plot preview. Reads the
@@ -8604,6 +8685,10 @@ class FrontMain:
         app.add_route("/api/satellites/stop", SatellitesStopResource())
         app.add_route("/api/satellites/active", SatellitesActiveResource())
         app.add_route("/api/satellites/path", SatellitesPathResource())
+        app.add_route(
+            "/api/{telescope_id:int}/satellites/camera/preset",
+            SatellitesCameraPresetResource(),
+        )
         app.add_route(
             "/{telescope_id:int}/live_tracker",
             LiveTrackerResource(),

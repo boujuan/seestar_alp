@@ -57,6 +57,77 @@
     </div>
 </div>
 
+<div class="panel-card panel-card-tight no-htmx-fx mb-2">
+    <div class="d-flex align-items-center gap-2" style="cursor:pointer" onclick="window.__satToggleLiveVideo()">
+        <span id="liveVideoChevron" style="font-size:1.1rem;">&#9656;</span>
+        <strong>Live camera</strong>
+        <span class="text-muted small">— telephoto preview, snap, record, timelapse</span>
+        <span class="ms-auto small">
+            <span id="liveCamStatus" class="text-muted">stopped</span>
+        </span>
+    </div>
+    <div id="liveVideoPanel" style="display:none; margin-top:10px;">
+        <div class="d-flex flex-wrap gap-3 align-items-start">
+            <div style="flex: 1 1 480px; min-width:360px;">
+                <img id="liveCamFeed"
+                     src=""
+                     style="width:100%; max-height:60vh; background:#0a0a0a; border-radius:4px; display:block;"
+                     alt="(stream not started — click Apply ISS preset below)">
+            </div>
+            <div style="flex: 0 0 280px;">
+                <h6 class="mb-2">Imaging preset</h6>
+                <div class="mb-2">
+                    <label class="form-label small mb-0">Camera</label>
+                    <select id="liveCamSelect" class="form-select form-select-sm">
+                        <option value="main" selected>Telephoto (main, f/5.33)</option>
+                        <option value="wide">Wide field (f/1.75)</option>
+                    </select>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small mb-0">Exposure (ms)</label>
+                    <input type="number" id="liveExposureMs" class="form-control form-control-sm"
+                           min="0.1" step="0.5" value="5">
+                    <span class="form-text small">5ms keeps ISS point-like at f/5.33 (1°/s sky rate). Lower for sharper / less smear; higher to gather more light from fainter sats.</span>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small mb-0">Gain (0-600)</label>
+                    <input type="number" id="liveGain" class="form-control form-control-sm"
+                           min="0" max="600" step="10" value="50">
+                </div>
+                <button type="button" class="btn btn-sm btn-primary w-100 mb-3"
+                        onclick="window.__satApplyPreset()">Apply preset &amp; start preview</button>
+
+                <h6 class="mb-2">Capture</h6>
+                <div class="d-grid gap-1 mb-3">
+                    <button type="button" class="btn btn-sm btn-outline-light" onclick="window.__satSnapPhoto()">
+                        📷 Snap photo (from preview)
+                    </button>
+                    <button type="button" id="liveRecBtn" class="btn btn-sm btn-outline-danger"
+                            onclick="window.__satRecordToggle()">
+                        ⏺ Start recording (AVI)
+                    </button>
+                </div>
+
+                <h6 class="mb-2">Timelapse</h6>
+                <div class="mb-2">
+                    <label class="form-label small mb-0">Frame interval (s)</label>
+                    <input type="number" id="liveTimelapseInterval" class="form-control form-control-sm"
+                           min="1" step="1" value="2">
+                </div>
+                <div class="d-grid gap-1">
+                    <button type="button" id="liveTimelapseBtn" class="btn btn-sm btn-outline-warning"
+                            onclick="window.__satTimelapseToggle()">
+                        🎞 Start timelapse
+                    </button>
+                </div>
+                <p class="small text-muted mt-2 mb-0">
+                    Snap = client-side capture of the current preview frame. Recording &amp; timelapse use the Seestar's native AVI recorder (saved on-device — pull via the Seestar app or its storage).
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div class="panel-card no-htmx-fx">
     <div id="satellitesTable">
         <div class="empty-state">Loading passes...</div>
@@ -618,6 +689,127 @@
         if (_sessionTimer) { clearInterval(_sessionTimer); _sessionTimer = null; }
     };
 
+    // -------------------------------------------------------------
+    // Live camera panel: MJPEG preview + snap + record + timelapse
+    // -------------------------------------------------------------
+    var _liveCamRecording = false;
+    var _liveCamTimelapse = false;
+
+    window.__satToggleLiveVideo = function () {
+        var panel = document.getElementById("liveVideoPanel");
+        var chev = document.getElementById("liveVideoChevron");
+        if (!panel) return;
+        var open = panel.style.display !== "none";
+        panel.style.display = open ? "none" : "block";
+        chev.innerHTML = open ? "&#9656;" : "&#9662;";
+        if (!open) {
+            // First open — restore preferences
+            var ex = localStorage.getItem("sat.liveExposureMs");
+            var gn = localStorage.getItem("sat.liveGain");
+            var cm = localStorage.getItem("sat.liveCam");
+            var tl = localStorage.getItem("sat.liveTimelapseInterval");
+            if (ex) document.getElementById("liveExposureMs").value = ex;
+            if (gn) document.getElementById("liveGain").value = gn;
+            if (cm) document.getElementById("liveCamSelect").value = cm;
+            if (tl) document.getElementById("liveTimelapseInterval").value = tl;
+        }
+        localStorage.setItem("sat.liveVideoOpen", open ? "false" : "true");
+    };
+
+    window.__satApplyPreset = function () {
+        var exp = parseFloat(document.getElementById("liveExposureMs").value || 5);
+        var gain = parseInt(document.getElementById("liveGain").value || 50, 10);
+        var cam = document.getElementById("liveCamSelect").value || "main";
+        localStorage.setItem("sat.liveExposureMs", exp);
+        localStorage.setItem("sat.liveGain", gain);
+        localStorage.setItem("sat.liveCam", cam);
+        // Telescope id: hardcode 1 for now (single-scope setup)
+        fetch("/api/1/satellites/camera/preset", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({exposure_ms: exp, gain: gain, cam: cam}),
+        }).then(function (r) { return r.json(); })
+          .then(function (data) {
+              document.getElementById("liveCamStatus").textContent =
+                  "running — exp " + (data.exposure_us / 1000).toFixed(1) + "ms, gain " + data.gain + ", cam " + data.cam;
+              // Start MJPEG; append a cache-buster so the browser reconnects
+              var img = document.getElementById("liveCamFeed");
+              img.src = "/1/live/video?t=" + Date.now();
+          }).catch(function (err) {
+              alert("Preset failed: " + err);
+          });
+    };
+
+    window.__satSnapPhoto = function () {
+        var img = document.getElementById("liveCamFeed");
+        if (!img || !img.src) {
+            alert("Start the preview first (Apply preset).");
+            return;
+        }
+        try {
+            var canvas = document.createElement("canvas");
+            // For MJPEG streams, naturalWidth/Height isn't reliable —
+            // fall back to displayed dimensions if needed.
+            var w = img.naturalWidth || img.width || 640;
+            var h = img.naturalHeight || img.height || 480;
+            canvas.width = w;
+            canvas.height = h;
+            canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+            canvas.toBlob(function (blob) {
+                if (!blob) { alert("Could not snap frame — try after a second of preview."); return; }
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement("a");
+                a.href = url;
+                a.download = "sat-snap-" + new Date().toISOString().replace(/[:.]/g, "-") + ".png";
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+            }, "image/png");
+        } catch (err) {
+            alert("Snap failed (likely CORS / tainted canvas): " + err);
+        }
+    };
+
+    window.__satRecordToggle = function () {
+        var btn = document.getElementById("liveRecBtn");
+        // Toggle is implemented server-side by the Seestar's
+        // start_record_avi / stop_record_avi (idempotent via state check).
+        fetch("/1/live/record", {
+            method: "POST",
+            headers: {"Content-Type": "application/x-www-form-urlencoded"},
+            body: "",   // empty body = no timelapse, normal video
+        }).then(function (r) { return r.text(); })
+          .then(function () {
+              _liveCamRecording = !_liveCamRecording;
+              btn.textContent = _liveCamRecording ? "⏹ Stop recording" : "⏺ Start recording (AVI)";
+              btn.className = _liveCamRecording
+                  ? "btn btn-sm btn-danger"
+                  : "btn btn-sm btn-outline-danger";
+          }).catch(function (err) { alert("Record toggle failed: " + err); });
+    };
+
+    window.__satTimelapseToggle = function () {
+        var btn = document.getElementById("liveTimelapseBtn");
+        var interval = parseInt(document.getElementById("liveTimelapseInterval").value || 2, 10);
+        localStorage.setItem("sat.liveTimelapseInterval", interval);
+        // Server-side toggle: if AVI recording is already active
+        // (timelapse or normal), it stops; otherwise starts timelapse.
+        var body = "timelapse=" + encodeURIComponent(interval);
+        fetch("/1/live/record", {
+            method: "POST",
+            headers: {"Content-Type": "application/x-www-form-urlencoded"},
+            body: body,
+        }).then(function (r) { return r.text(); })
+          .then(function () {
+              _liveCamTimelapse = !_liveCamTimelapse;
+              btn.textContent = _liveCamTimelapse ? "⏹ Stop timelapse" : "🎞 Start timelapse";
+              btn.className = _liveCamTimelapse
+                  ? "btn btn-sm btn-warning"
+                  : "btn btn-sm btn-outline-warning";
+          }).catch(function (err) { alert("Timelapse toggle failed: " + err); });
+    };
+
     // 1 Hz live ticker: updates countdown cells and the "Last refresh
     // N s ago" status without re-fetching from the server. Re-evaluates
     // the imminent / in-progress row classes too so they switch at the
@@ -666,6 +858,10 @@
         if (ps) ps.value = localStorage.getItem("sat.trackPreSlew") || "fast";
         var sp = document.getElementById("trackSkipPrecheck");
         if (sp) sp.checked = localStorage.getItem("sat.trackSkipPrecheck") === "true";
+        // Restore Live-camera panel state
+        if (localStorage.getItem("sat.liveVideoOpen") === "true") {
+            window.__satToggleLiveVideo();
+        }
         fetchList();
         fetchSessionState();
         setInterval(tickClock, 1000);
