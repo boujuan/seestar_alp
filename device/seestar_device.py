@@ -855,17 +855,21 @@ class Seestar:
 
                     cur_ra = float(self.ra)
                     cur_dec = float(self.dec)
-                    loc = EarthLocation.from_geodetic(
-                        lat=float(Config.init_lat) * u.deg,
-                        lon=float(Config.init_long) * u.deg,
-                    )
-                    aa = SkyCoord(
-                        ra=cur_ra * u.hour, dec=cur_dec * u.deg, frame="icrs"
-                    ).transform_to(
-                        AltAz(obstime=Time.now(), location=loc)
-                    )
-                    start_az = float(aa.az.deg) % 360.0
-                    start_el = float(aa.alt.deg)
+                    # Firmware reports (0, 0) before any plate-solve
+                    # alignment — treat as "unknown" so we don't feed
+                    # bogus start coords into the path check.
+                    if abs(cur_ra) > 1e-6 or abs(cur_dec) > 1e-6:
+                        loc = EarthLocation.from_geodetic(
+                            lat=float(Config.init_lat) * u.deg,
+                            lon=float(Config.init_long) * u.deg,
+                        )
+                        aa = SkyCoord(
+                            ra=cur_ra * u.hour, dec=cur_dec * u.deg, frame="icrs"
+                        ).transform_to(
+                            AltAz(obstime=Time.now(), location=loc)
+                        )
+                        start_az = float(aa.az.deg) % 360.0
+                        start_el = float(aa.alt.deg)
                 except Exception:
                     pass
 
