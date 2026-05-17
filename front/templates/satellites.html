@@ -153,12 +153,13 @@
             var rowKey = p.path;
             var expanded = _expandedKeys.has(rowKey);
             html += '<tr class="sat-row' + imminent + live + pinClass + '" '
-                 +  'style="cursor:pointer" '
-                 +  'onclick="window.__satToggleRow(event,' + JSON.stringify(rowKey).replace(/"/g, "&quot;") + ')">'
+                 +  ' data-start-unix="' + p.start_unix + '" data-end-unix="' + (p.end_unix || 0) + '"'
+                 +  ' style="cursor:pointer" '
+                 +  ' onclick="window.__satToggleRow(event,' + JSON.stringify(rowKey).replace(/"/g, "&quot;") + ')">'
                  +  '<td><span class="pass-name' + (p.tle_pinned ? ' pinned' : '') + (p.is_in_progress ? ' in-progress' : '') + '">'
                  +    escapeHtml(p.name) + '</span></td>'
                  +  '<td>' + startDate.toLocaleString() + '</td>'
-                 +  '<td class="countdown">' + fmtCountdown(p.seconds_to_start) + '</td>'
+                 +  '<td class="countdown" data-start-unix="' + p.start_unix + '">' + fmtCountdown(p.seconds_to_start) + '</td>'
                  +  '<td>' + Math.round(p.duration_s) + ' s</td>'
                  +  '<td class="' + elClass + '">' + p.peak_el_deg.toFixed(1) + '&deg;</td>'
                  +  '<td class="' + rateClass + '">' + rate.toFixed(2) + ' &deg;/s</td>'
@@ -303,6 +304,13 @@
         var btn = document.getElementById("refreshBtn");
         var status = document.getElementById("refreshStatus");
         if (!btn || !status) return;
+        // Stash for the 1-Hz ticker to keep "Last refresh N s ago" live
+        if (state.finished_unix) {
+            status.dataset.lastRefresh = state.finished_unix;
+            status.dataset.passCount = passCount;
+        } else {
+            delete status.dataset.lastRefresh;
+        }
         if (state.running) {
             btn.disabled = true;
             btn.textContent = "Refreshing...";
@@ -468,6 +476,41 @@
         if (_sessionTimer) { clearInterval(_sessionTimer); _sessionTimer = null; }
     };
 
+    // 1 Hz live ticker: updates countdown cells and the "Last refresh
+    // N s ago" status without re-fetching from the server. Re-evaluates
+    // the imminent / in-progress row classes too so they switch at the
+    // exact second the pass starts / ends.
+    function tickClock() {
+        var now = Date.now() / 1000;
+        document.querySelectorAll(".countdown[data-start-unix]").forEach(function (cell) {
+            var startU = parseFloat(cell.getAttribute("data-start-unix"));
+            if (!startU) return;
+            cell.textContent = fmtCountdown(startU - now);
+        });
+        document.querySelectorAll(".sat-row").forEach(function (row) {
+            var startU = parseFloat(row.getAttribute("data-start-unix") || 0);
+            var endU = parseFloat(row.getAttribute("data-end-unix") || 0);
+            if (!startU) return;
+            var dt = startU - now;
+            var inProgress = dt < 0 && endU > now;
+            var imminent = dt > 0 && dt <= 600;
+            row.classList.toggle("in-progress", inProgress);
+            row.classList.toggle("imminent", imminent);
+        });
+        // Also update the 'Last refresh' status text live, derived from
+        // the data-last-refresh attribute that fetchList stamps onto
+        // the refreshStatus element.
+        var status = document.getElementById("refreshStatus");
+        if (status && status.dataset.lastRefresh) {
+            var lr = parseFloat(status.dataset.lastRefresh);
+            var pn = parseInt(status.dataset.passCount || "0", 10);
+            if (!isNaN(lr) && lr > 0) {
+                var ago = Math.round(now - lr);
+                status.textContent = pn + " upcoming pass(es). Last refresh " + ago + " s ago.";
+            }
+        }
+    }
+
     document.addEventListener("DOMContentLoaded", function () {
         // Restore filter checkbox state from localStorage
         var vo = document.getElementById("filterVisibleOnly");
@@ -476,6 +519,7 @@
         if (po) po.checked = _priorityOnly;
         fetchList();
         fetchSessionState();
+        setInterval(tickClock, 1000);
     });
 })();
 </script>
