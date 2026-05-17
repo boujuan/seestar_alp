@@ -87,12 +87,23 @@
                     <label class="form-label small mb-0">Exposure (ms)</label>
                     <input type="number" id="liveExposureMs" class="form-control form-control-sm"
                            min="0.1" step="0.5" value="5">
-                    <span class="form-text small">5ms keeps ISS point-like at f/5.33 (1°/s sky rate). Lower for sharper / less smear; higher to gather more light from fainter sats.</span>
+                    <span class="form-text small">Sized to avoid <b>overexposing</b> the satellite (tracking removes smear). On the IMX585 + telephoto f/5.33, ISS at mag −1.7 saturates in ~1–5 ms at low gain — go longer and the body washes out white.</span>
                 </div>
                 <div class="mb-2">
                     <label class="form-label small mb-0">Gain (0-600)</label>
                     <input type="number" id="liveGain" class="form-control form-control-sm"
                            min="0" max="600" step="10" value="50">
+                </div>
+                <div class="d-flex gap-1 mb-2 flex-wrap">
+                    <span class="small text-muted me-1">Quick:</span>
+                    <button type="button" class="btn btn-sm btn-outline-light py-0 px-2"
+                            onclick="window.__satExpPreset(2, 0)" title="Very bright sats (Iridium flares, ISS at culmination)">ISS bright (2ms, g=0)</button>
+                    <button type="button" class="btn btn-sm btn-outline-light py-0 px-2"
+                            onclick="window.__satExpPreset(5, 50)" title="ISS rise/set, Tianhe">ISS / Tianhe (5ms, g=50)</button>
+                    <button type="button" class="btn btn-sm btn-outline-light py-0 px-2"
+                            onclick="window.__satExpPreset(20, 150)" title="Mag 0 to +3 sats (bright Starlinks, COSMOS)">Mag 0–+3 (20ms, g=150)</button>
+                    <button type="button" class="btn btn-sm btn-outline-light py-0 px-2"
+                            onclick="window.__satExpPreset(100, 300)" title="Mag +3 to +6 sats (most LEO rocket bodies)">Faint (100ms, g=300)</button>
                 </div>
                 <button type="button" class="btn btn-sm btn-primary w-100 mb-3"
                         onclick="window.__satApplyPreset()">Apply preset &amp; start preview</button>
@@ -714,6 +725,15 @@
             if (tl) document.getElementById("liveTimelapseInterval").value = tl;
         }
         localStorage.setItem("sat.liveVideoOpen", open ? "false" : "true");
+    };
+
+    window.__satExpPreset = function (expMs, gain) {
+        document.getElementById("liveExposureMs").value = expMs;
+        document.getElementById("liveGain").value = gain;
+        // Auto-apply if the preview is already running
+        if ((document.getElementById("liveCamFeed").src || "").indexOf("live/video") >= 0) {
+            window.__satApplyPreset();
+        }
     };
 
     window.__satApplyPreset = function () {
