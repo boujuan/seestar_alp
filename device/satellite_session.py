@@ -206,12 +206,15 @@ class SatelliteTrackSession:
                 self._status.finished_unix = time.time()
 
     def _do_run(self) -> None:
-        # Build observer site + mount frame
+        # Build observer site + mount frame. Use scripts.trajectory.observer's
+        # build_site (returns a full ObserverSite with ecef_xyz, ENU rotation,
+        # etc.) — anchored to the Seestar's configured lat/long.
+        from scripts.trajectory.observer import build_site
         lat = float(Config.init_lat)
         lon = float(Config.init_long)
         alt = float(getattr(Config, "init_height", 0.0) or 0.0)
         loc = EarthLocation.from_geodetic(lon=lon, lat=lat, height=alt)
-        site = _SiteShim(lat_deg=lat, lon_deg=lon, alt_m=alt)
+        site = build_site(lat_deg=lat, lon_deg=lon, alt_m=alt)
         if _CALIBRATION_JSON.exists():
             try:
                 mount_frame = MountFrame.from_calibration_json(_CALIBRATION_JSON, site)
