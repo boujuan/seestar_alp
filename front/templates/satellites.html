@@ -23,6 +23,20 @@
     <!-- populated by JS when a track is in flight -->
 </div>
 
+<div class="panel-card panel-card-tight no-htmx-fx mb-2">
+    <div class="d-flex gap-3 align-items-center flex-wrap">
+        <label class="form-check-label">
+            <input type="checkbox" id="filterVisibleOnly" class="form-check-input me-1">
+            Visible only
+        </label>
+        <label class="form-check-label">
+            <input type="checkbox" id="filterPriorityOnly" class="form-check-input me-1">
+            ISS &amp; Tianhe only
+        </label>
+        <span class="text-muted small ms-auto">Click a row to preview the sky-plot. Click column headers to sort.</span>
+    </div>
+</div>
+
 <div class="panel-card no-htmx-fx">
     <div id="satellitesTable">
         <div class="empty-state">Loading passes...</div>
@@ -64,64 +78,220 @@
         return sign + ss + "s";
     }
 
+    // Sort + filter state, persisted to localStorage
+    var _passes = [];  // last fetched payload
+    var _sortKey = localStorage.getItem("sat.sortKey") || "start_unix";
+    var _sortAsc = (localStorage.getItem("sat.sortAsc") || "true") === "true";
+    var _visibleOnly = (localStorage.getItem("sat.visibleOnly") || "false") === "true";
+    var _priorityOnly = (localStorage.getItem("sat.priorityOnly") || "false") === "true";
+    var _expandedKeys = new Set();   // track which rows have a sky-plot expanded
+
+    var COLUMNS = [
+        {key: "name",            label: "Pass",          get: function (p) { return p.name.toLowerCase(); }},
+        {key: "start_unix",      label: "Start (local)", get: function (p) { return p.start_unix; }},
+        {key: "countdown",       label: "Countdown",     get: function (p) { return p.seconds_to_start != null ? p.seconds_to_start : 1e18; }},
+        {key: "duration_s",      label: "Duration",      get: function (p) { return p.duration_s; }},
+        {key: "peak_el_deg",     label: "Peak el",       get: function (p) { return p.peak_el_deg; }},
+        {key: "peak_rate",       label: "Peak rate",     get: function (p) { return Math.max(p.peak_v_az_degs || 0, p.peak_v_el_degs || 0); }},
+        {key: "peak_visible_mag", label: "Mag",          get: function (p) { return p.peak_visible_mag != null ? p.peak_visible_mag : 999; }},
+        {key: "score",           label: "Score",         get: function (p) { return p.score; }},
+        {key: "notes",           label: "Notes",         get: function () { return 0; }, nosort: true},
+        {key: "actions",         label: "",              get: function () { return 0; }, nosort: true},
+    ];
+
+    function sortAndFilter() {
+        var visible = _visibleOnly ? _passes.filter(function (p) { return p.peak_visible_mag != null; }) : _passes.slice();
+        if (_priorityOnly) {
+            visible = visible.filter(function (p) {
+                var u = (p.name || "").toUpperCase();
+                return u.indexOf("ISS") >= 0 || u.indexOf("TIANHE") >= 0
+                       || u.indexOf("CSS") >= 0 || u.indexOf("HST") >= 0;
+            });
+        }
+        var col = COLUMNS.find(function (c) { return c.key === _sortKey; }) || COLUMNS[1];
+        visible.sort(function (a, b) {
+            var va = col.get(a), vb = col.get(b);
+            if (va == vb) return 0;
+            return (_sortAsc ? 1 : -1) * (va < vb ? -1 : 1);
+        });
+        return visible;
+    }
+
     function renderTable(data) {
+        if (data && data.passes) _passes = data.passes;
         var el = document.getElementById("satellitesTable");
         if (!el) return;
-        var html = "";
-        if (!data.passes || !data.passes.length) {
-            html = '<div class="empty-state">No passes loaded. Click <b>Refresh passes</b> to fetch the next 48 hours from CelesTrak.</div>';
-        } else {
-            html = '<table class="table table-hover align-middle mb-0"><thead><tr>'
-                +  '<th>Pass</th>'
-                +  '<th>Start (local)</th>'
-                +  '<th>Countdown</th>'
-                +  '<th>Duration</th>'
-                +  '<th>Peak el</th>'
-                +  '<th>Peak rate</th>'
-                +  '<th>Mag</th>'
-                +  '<th>Score</th>'
-                +  '<th>Notes</th>'
-                +  '<th></th>'
-                +  '</tr></thead><tbody>';
-            data.passes.forEach(function (p) {
-                var imminent = p.is_imminent ? " imminent" : "";
-                var live = p.is_in_progress ? " in-progress" : "";
-                var pinClass = p.tle_pinned ? " pinned" : "";
-                var startDate = new Date(p.start_unix * 1000);
-                var rate = Math.max(p.peak_v_az_degs || 0, p.peak_v_el_degs || 0);
-                var rateClass = rate > 5.5 ? "pass-bad" : (rate > 3 ? "pass-warn" : "");
-                var elClass = p.peak_el_deg > 80 ? "pass-bad" : (p.peak_el_deg > 70 ? "pass-warn" : "");
-                var notesHtml = (p.notes || []).map(function (n) {
-                    return '<span class="badge bg-warning text-dark me-1">' + escapeHtml(n) + '</span>';
-                }).join("");
-                if (!p.feasible) notesHtml = '<span class="badge bg-danger">infeasible</span> ' + notesHtml;
-                html += '<tr class="sat-row' + imminent + live + pinClass + '">'
-                     +  '<td><span class="pass-name' + (p.tle_pinned ? ' pinned' : '') + (p.is_in_progress ? ' in-progress' : '') + '">'
-                     +    escapeHtml(p.name) + '</span></td>'
-                     +  '<td>' + startDate.toLocaleString() + '</td>'
-                     +  '<td class="countdown">' + fmtCountdown(p.seconds_to_start) + '</td>'
-                     +  '<td>' + Math.round(p.duration_s) + ' s</td>'
-                     +  '<td class="' + elClass + '">' + p.peak_el_deg.toFixed(1) + '&deg;</td>'
-                     +  '<td class="' + rateClass + '">' + rate.toFixed(2) + ' &deg;/s</td>'
-                     +  '<td>' + (p.peak_visible_mag != null
-                            ? (p.peak_visible_mag <= 2 ? '<b>' : '')
-                              + (p.peak_visible_mag).toFixed(1)
-                              + (p.peak_visible_mag <= 2 ? '</b>' : '')
-                              + (p.visible_seconds ? ' <small class="text-muted">(' + Math.round(p.visible_seconds) + 's)</small>' : '')
-                            : (p.any_sunlit
-                               ? '<span class="text-muted" title="sat is sunlit but observer sky is too bright (sun above -6°)">daytime</span>'
-                               : '<span class="text-muted" title="sat in Earth shadow throughout pass">shadow</span>')) + '</td>'
-                     +  '<td>' + p.score.toFixed(0) + '</td>'
-                     +  '<td>' + notesHtml + '</td>'
-                     +  '<td><button type="button" class="btn btn-sm btn-outline-primary" '
-                     +    'onclick="window.__satTrack(' + JSON.stringify(p.path).replace(/"/g, "&quot;") + ', '
-                     +    JSON.stringify(p.name).replace(/"/g, "&quot;") + ')">Track</button></td>'
-                     +  '</tr>';
-            });
-            html += '</tbody></table>';
+        var rows = sortAndFilter();
+        if (!rows.length) {
+            el.innerHTML = '<div class="empty-state">No passes match current filters. '
+                + (_passes.length ? "Try unchecking 'Visible only' or 'ISS &amp; Tianhe only'." : "Click <b>Refresh passes</b> to fetch from CelesTrak.")
+                + '</div>';
+            return;
         }
+        var html = '<table class="table table-hover align-middle mb-0"><thead><tr>';
+        COLUMNS.forEach(function (c) {
+            if (c.nosort) {
+                html += '<th>' + escapeHtml(c.label) + '</th>';
+            } else {
+                var indicator = _sortKey === c.key ? (_sortAsc ? " &uarr;" : " &darr;") : "";
+                html += '<th style="cursor:pointer; user-select:none" onclick="window.__satSort(' + JSON.stringify(c.key) + ')">' + escapeHtml(c.label) + indicator + '</th>';
+            }
+        });
+        html += '</tr></thead><tbody>';
+        rows.forEach(function (p) {
+            var imminent = p.is_imminent ? " imminent" : "";
+            var live = p.is_in_progress ? " in-progress" : "";
+            var pinClass = p.tle_pinned ? " pinned" : "";
+            var startDate = new Date(p.start_unix * 1000);
+            var rate = Math.max(p.peak_v_az_degs || 0, p.peak_v_el_degs || 0);
+            var rateClass = rate > 5.5 ? "pass-bad" : (rate > 3 ? "pass-warn" : "");
+            var elClass = p.peak_el_deg > 80 ? "pass-bad" : (p.peak_el_deg > 70 ? "pass-warn" : "");
+            var notesHtml = (p.notes || []).map(function (n) {
+                return '<span class="badge bg-warning text-dark me-1">' + escapeHtml(n) + '</span>';
+            }).join("");
+            if (!p.feasible) notesHtml = '<span class="badge bg-danger">infeasible</span> ' + notesHtml;
+            var rowKey = p.path;
+            var expanded = _expandedKeys.has(rowKey);
+            html += '<tr class="sat-row' + imminent + live + pinClass + '" '
+                 +  'style="cursor:pointer" '
+                 +  'onclick="window.__satToggleRow(event,' + JSON.stringify(rowKey).replace(/"/g, "&quot;") + ')">'
+                 +  '<td><span class="pass-name' + (p.tle_pinned ? ' pinned' : '') + (p.is_in_progress ? ' in-progress' : '') + '">'
+                 +    escapeHtml(p.name) + '</span></td>'
+                 +  '<td>' + startDate.toLocaleString() + '</td>'
+                 +  '<td class="countdown">' + fmtCountdown(p.seconds_to_start) + '</td>'
+                 +  '<td>' + Math.round(p.duration_s) + ' s</td>'
+                 +  '<td class="' + elClass + '">' + p.peak_el_deg.toFixed(1) + '&deg;</td>'
+                 +  '<td class="' + rateClass + '">' + rate.toFixed(2) + ' &deg;/s</td>'
+                 +  '<td>' + (p.peak_visible_mag != null
+                        ? (p.peak_visible_mag <= 2 ? '<b>' : '')
+                          + (p.peak_visible_mag).toFixed(1)
+                          + (p.peak_visible_mag <= 2 ? '</b>' : '')
+                          + (p.visible_seconds ? ' <small class="text-muted">(' + Math.round(p.visible_seconds) + 's)</small>' : '')
+                        : (p.any_sunlit
+                           ? '<span class="text-muted" title="sat is sunlit but observer sky is too bright (sun above -6°)">daytime</span>'
+                           : '<span class="text-muted" title="sat in Earth shadow throughout pass">shadow</span>')) + '</td>'
+                 +  '<td>' + p.score.toFixed(0) + '</td>'
+                 +  '<td>' + notesHtml + '</td>'
+                 +  '<td><button type="button" class="btn btn-sm btn-outline-primary" '
+                 +    'onclick="event.stopPropagation(); window.__satTrack(' + JSON.stringify(p.path).replace(/"/g, "&quot;") + ', '
+                 +    JSON.stringify(p.name).replace(/"/g, "&quot;") + ')">Track</button></td>'
+                 +  '</tr>';
+            if (expanded) {
+                html += '<tr><td colspan="' + COLUMNS.length + '">'
+                     +    '<div id="skyplot-' + cssId(rowKey) + '" class="empty-state">Loading sky-plot...</div>'
+                     + '</td></tr>';
+            }
+        });
+        html += '</tbody></table>';
         el.innerHTML = html;
+        // After render, populate sky-plots that need it
+        _expandedKeys.forEach(function (k) {
+            var holder = document.getElementById("skyplot-" + cssId(k));
+            if (holder && holder.innerHTML.indexOf("Loading") === 0) {
+                renderSkyPlot(k, holder);
+            }
+        });
     }
+
+    function cssId(s) {
+        return String(s).replace(/[^a-zA-Z0-9]/g, "_");
+    }
+
+    function renderSkyPlot(filePath, holder) {
+        fetch("/api/satellites/path?file=" + encodeURIComponent(filePath))
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (!data.points || !data.points.length) {
+                    holder.innerHTML = '<div class="text-muted">No path data.</div>';
+                    return;
+                }
+                holder.innerHTML = svgSkyPlot(data);
+            })
+            .catch(function (err) {
+                holder.innerHTML = '<div class="text-danger">sky-plot failed: ' + escapeHtml(String(err)) + '</div>';
+            });
+    }
+
+    function svgSkyPlot(data) {
+        // Polar projection: radius = 90° - elevation, angle = azimuth (0 = N up, clockwise)
+        var size = 320, cx = size / 2, cy = size / 2, R = size / 2 - 12;
+        function project(az_deg, el_deg) {
+            var r = (90 - Math.max(-5, el_deg)) / 95 * R;
+            var theta = (az_deg - 90) * Math.PI / 180;  // 0 az = north (up)
+            return {x: cx + r * Math.cos(theta), y: cy + r * Math.sin(theta)};
+        }
+        var path = data.points.map(function (pt, i) {
+            var p = project(pt.az, pt.el);
+            return (i === 0 ? "M" : "L") + p.x.toFixed(1) + " " + p.y.toFixed(1);
+        }).join(" ");
+        var startP = project(data.points[0].az, data.points[0].el);
+        var endP = project(data.points[data.points.length - 1].az, data.points[data.points.length - 1].el);
+        // Find peak (highest el) for label
+        var peak = data.points.reduce(function (a, b) { return b.el > a.el ? b : a; }, data.points[0]);
+        var peakP = project(peak.az, peak.el);
+        // Compass markers
+        var compass = "";
+        ["N", "E", "S", "W"].forEach(function (d, i) {
+            var az = i * 90;
+            var p = project(az, 0);
+            // Place label just outside the circle
+            var theta = (az - 90) * Math.PI / 180;
+            var lx = cx + (R + 8) * Math.cos(theta), ly = cy + (R + 8) * Math.sin(theta);
+            compass += '<text x="' + lx + '" y="' + (ly + 4) + '" text-anchor="middle" fill="#9ca3af" font-size="11">' + d + '</text>';
+        });
+        // Elevation circles 30/60
+        var elCircles = "";
+        [30, 60].forEach(function (e) {
+            var rr = (90 - e) / 95 * R;
+            elCircles += '<circle cx="' + cx + '" cy="' + cy + '" r="' + rr + '" fill="none" stroke="#374151" stroke-width="1" stroke-dasharray="2 3"/>';
+            elCircles += '<text x="' + cx + '" y="' + (cy - rr - 2) + '" fill="#9ca3af" font-size="10" text-anchor="middle">' + e + '&deg;</text>';
+        });
+        return '<svg width="' + size + '" height="' + size + '" style="background:rgba(255,255,255,0.03); border-radius:8px">'
+             + '<circle cx="' + cx + '" cy="' + cy + '" r="' + R + '" fill="none" stroke="#6b7280" stroke-width="1.5"/>'
+             + elCircles
+             + compass
+             + '<path d="' + path + '" fill="none" stroke="#22c55e" stroke-width="2.2"/>'
+             + '<circle cx="' + startP.x + '" cy="' + startP.y + '" r="4" fill="#3b82f6"/>'
+             + '<text x="' + (startP.x + 6) + '" y="' + (startP.y + 4) + '" fill="#60a5fa" font-size="10">start</text>'
+             + '<circle cx="' + peakP.x + '" cy="' + peakP.y + '" r="4" fill="#f59e0b"/>'
+             + '<text x="' + (peakP.x + 6) + '" y="' + (peakP.y + 4) + '" fill="#fbbf24" font-size="10">peak</text>'
+             + '<circle cx="' + endP.x + '" cy="' + endP.y + '" r="4" fill="#ef4444"/>'
+             + '<text x="' + (endP.x + 6) + '" y="' + (endP.y + 4) + '" fill="#fca5a5" font-size="10">end</text>'
+             + '<text x="6" y="14" fill="#9ca3af" font-size="10">' + (data.n_samples || 0) + ' samples</text>'
+             + '</svg>';
+    }
+
+    window.__satSort = function (key) {
+        if (_sortKey === key) {
+            _sortAsc = !_sortAsc;
+        } else {
+            _sortKey = key;
+            _sortAsc = true;
+        }
+        localStorage.setItem("sat.sortKey", _sortKey);
+        localStorage.setItem("sat.sortAsc", String(_sortAsc));
+        renderTable(null);
+    };
+
+    window.__satToggleRow = function (ev, key) {
+        // Avoid toggling when clicking on actions inside the row
+        if (ev && ev.target && ev.target.tagName === "BUTTON") return;
+        if (_expandedKeys.has(key)) { _expandedKeys.delete(key); }
+        else { _expandedKeys.add(key); }
+        renderTable(null);
+    };
+
+    document.addEventListener("change", function (ev) {
+        if (ev.target.id === "filterVisibleOnly") {
+            _visibleOnly = ev.target.checked;
+            localStorage.setItem("sat.visibleOnly", String(_visibleOnly));
+            renderTable(null);
+        } else if (ev.target.id === "filterPriorityOnly") {
+            _priorityOnly = ev.target.checked;
+            localStorage.setItem("sat.priorityOnly", String(_priorityOnly));
+            renderTable(null);
+        }
+    });
 
     function escapeHtml(s) {
         if (s == null) return "";
@@ -299,6 +469,11 @@
     };
 
     document.addEventListener("DOMContentLoaded", function () {
+        // Restore filter checkbox state from localStorage
+        var vo = document.getElementById("filterVisibleOnly");
+        if (vo) vo.checked = _visibleOnly;
+        var po = document.getElementById("filterPriorityOnly");
+        if (po) po.checked = _priorityOnly;
         fetchList();
         fetchSessionState();
     });

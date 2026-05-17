@@ -4536,6 +4536,83 @@ class SatellitesActiveResource:
         resp.text = json.dumps(_satellite_session_payload())
 
 
+class SatellitesPathResource:
+    """GET /api/satellites/path?file=<path> — return a downsampled set
+    of (t_unix, az, el) points for the sky-plot preview. Reads the
+    pass's JSONL file directly. Caps at MAX_POINTS samples so the SVG
+    stays light."""
+
+    MAX_POINTS = 60
+
+    @staticmethod
+    def on_get(req, resp):
+        file_str = req.get_param("file", default="").strip()
+        if not file_str:
+            resp.status = falcon.HTTP_400
+            resp.content_type = "application/json"
+            resp.text = json.dumps({"error": "missing 'file' parameter"})
+            return
+        path = Path(file_str)
+        if not path.is_absolute():
+            path = _SATELLITES_DIR / path.name
+        # Constrain to the satellites directory to prevent path traversal.
+        try:
+            path.resolve().relative_to(_SATELLITES_DIR.resolve())
+        except (ValueError, OSError):
+            resp.status = falcon.HTTP_403
+            resp.content_type = "application/json"
+            resp.text = json.dumps({"error": "file outside satellites directory"})
+            return
+        if not path.exists():
+            resp.status = falcon.HTTP_404
+            resp.content_type = "application/json"
+            resp.text = json.dumps({"error": f"file not found: {path.name}"})
+            return
+
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                header_line = f.readline()
+                samples = []
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("kind") != "sample":
+                        continue
+                    samples.append({
+                        "t": float(rec.get("t_unix", 0)),
+                        "az": float(rec.get("az_deg", 0)),
+                        "el": float(rec.get("el_deg", 0)),
+                    })
+            header = json.loads(header_line) if header_line else {}
+        except Exception as exc:
+            resp.status = falcon.HTTP_500
+            resp.content_type = "application/json"
+            resp.text = json.dumps({"error": str(exc)})
+            return
+
+        # Downsample to MAX_POINTS evenly
+        n = len(samples)
+        if n > SatellitesPathResource.MAX_POINTS:
+            step = max(1, n // SatellitesPathResource.MAX_POINTS)
+            samples = samples[::step]
+            # Always include the last sample so the path closes
+            if samples and samples[-1] is not None:
+                pass
+
+        resp.status = falcon.HTTP_200
+        resp.content_type = "application/json"
+        resp.text = json.dumps({
+            "name": header.get("name"),
+            "n_samples": n,
+            "points": samples,
+        })
+
+
 class SatellitesStartResource:
     """POST {file: str, dry_run: bool, skip_precheck: bool} — kicks off
     a satellite tracking session. 409 if one is already active."""
@@ -8503,6 +8580,7 @@ class FrontMain:
         app.add_route("/api/satellites/start", SatellitesStartResource())
         app.add_route("/api/satellites/stop", SatellitesStopResource())
         app.add_route("/api/satellites/active", SatellitesActiveResource())
+        app.add_route("/api/satellites/path", SatellitesPathResource())
         app.add_route(
             "/{telescope_id:int}/live_tracker",
             LiveTrackerResource(),
