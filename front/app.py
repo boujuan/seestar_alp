@@ -4486,6 +4486,131 @@ class SatellitesRefreshResource:
         })
 
 
+# ---------- Satellite tracking session (Phase 2) ---------------------
+#
+# Single global session that wraps streaming_controller.track() in a
+# background thread. The UI calls /api/satellites/start with the JSONL
+# file path of the pass, polls /api/satellites/active for live state,
+# and POSTs /api/satellites/stop to abort.
+
+
+def _satellite_session_payload():
+    """Serialise the session status (or 'idle' if none active)."""
+    from device.satellite_session import get_satellite_session
+    s = get_satellite_session()
+    if s is None:
+        return {"active": False, "phase": "idle"}
+    st = s.status()
+    return {
+        "active": st.active,
+        "phase": st.phase,
+        "pass_name": st.pass_name,
+        "file": st.file,
+        "dry_run": st.dry_run,
+        "started_unix": st.started_unix,
+        "finished_unix": st.finished_unix,
+        "pass_start_unix": st.pass_start_unix,
+        "pass_end_unix": st.pass_end_unix,
+        "last_tick": st.last_tick,
+        "last_tick_unix": st.last_tick_unix,
+        "cur_alt_deg": st.cur_alt_deg,
+        "cur_az_deg": st.cur_az_deg,
+        "ref_alt_deg": st.ref_alt_deg,
+        "ref_az_deg": st.ref_az_deg,
+        "err_az_deg": st.err_az_deg,
+        "err_el_deg": st.err_el_deg,
+        "pre_check_feasible": st.pre_check_feasible,
+        "pre_check_notes": st.pre_check_notes,
+        "exit_reason": st.exit_reason,
+        "errors": st.errors,
+    }
+
+
+class SatellitesActiveResource:
+    """GET endpoint polled by the live-track UI."""
+
+    @staticmethod
+    def on_get(req, resp):
+        resp.status = falcon.HTTP_200
+        resp.content_type = "application/json"
+        resp.text = json.dumps(_satellite_session_payload())
+
+
+class SatellitesStartResource:
+    """POST {file: str, dry_run: bool, skip_precheck: bool} — kicks off
+    a satellite tracking session. 409 if one is already active."""
+
+    @staticmethod
+    def on_post(req, resp):
+        from device.satellite_session import start_session, get_satellite_session
+
+        try:
+            body = req.media if req.content_length else {}
+        except Exception:
+            body = {}
+        file_str = (body.get("file") or "").strip()
+        if not file_str:
+            resp.status = falcon.HTTP_400
+            resp.content_type = "application/json"
+            resp.text = json.dumps({"ok": False, "error": "missing 'file' parameter"})
+            return
+        path = Path(file_str)
+        if not path.is_absolute():
+            path = _SATELLITES_DIR / path.name  # treat as basename under sat dir
+        if not path.exists():
+            resp.status = falcon.HTTP_404
+            resp.content_type = "application/json"
+            resp.text = json.dumps({"ok": False, "error": f"file not found: {path}"})
+            return
+
+        # Reject if a session is already running
+        existing = get_satellite_session()
+        if existing is not None and existing.is_alive():
+            resp.status = falcon.HTTP_409
+            resp.content_type = "application/json"
+            resp.text = json.dumps({
+                "ok": False,
+                "error": "a satellite session is already active — stop it first",
+                "active": _satellite_session_payload(),
+            })
+            return
+
+        dry_run = bool(body.get("dry_run", False))
+        skip_precheck = bool(body.get("skip_precheck", False))
+        session, started = start_session(
+            path,
+            dry_run=dry_run,
+            skip_precheck=skip_precheck,
+        )
+        logger.info(
+            "satellite session start: file=%s dry_run=%s skip_precheck=%s started_new=%s",
+            path.name, dry_run, skip_precheck, started,
+        )
+        resp.status = falcon.HTTP_202
+        resp.content_type = "application/json"
+        resp.text = json.dumps({
+            "ok": True,
+            "started_new": started,
+            "state": _satellite_session_payload(),
+        })
+
+
+class SatellitesStopResource:
+    """POST — stop the active session (idempotent)."""
+
+    @staticmethod
+    def on_post(req, resp):
+        from device.satellite_session import stop_session
+        stop_session()
+        logger.info("satellite session stop requested")
+        resp.status = falcon.HTTP_200
+        resp.content_type = "application/json"
+        resp.text = json.dumps({
+            "ok": True,
+            "state": _satellite_session_payload(),
+        })
+
+
 class LiveTrackerResource:
     """Serve the live plane/satellite tracker page."""
 
@@ -8374,6 +8499,10 @@ class FrontMain:
         app.add_route("/satellites", SatellitesPageResource())
         app.add_route("/api/satellites/list", SatellitesListResource())
         app.add_route("/api/satellites/refresh", SatellitesRefreshResource())
+        # ---- Satellite tracking session ----
+        app.add_route("/api/satellites/start", SatellitesStartResource())
+        app.add_route("/api/satellites/stop", SatellitesStopResource())
+        app.add_route("/api/satellites/active", SatellitesActiveResource())
         app.add_route(
             "/{telescope_id:int}/live_tracker",
             LiveTrackerResource(),
