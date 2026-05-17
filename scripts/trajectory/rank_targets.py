@@ -108,9 +108,7 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
 
     # Distinguish FIXABLE infeasibility (cable-wrap — can be solved by
     # pre-positioning the mount before the track starts) from TRULY
-    # broken passes (el-limit, FF saturation, replay saturation). The
-    # cable-wrap-only case is shown as a warning in the UI and still
-    # scored reasonably; the truly-broken case is zeroed.
+    # broken passes (el-limit, FF saturation, replay saturation).
     truly_infeasible = bool(
         pre.el_limit_violations
         or pre.v_saturation_ticks
@@ -119,35 +117,67 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
     )
     cable_wrap_only = bool(pre.cable_wrap_violations) and not truly_infeasible
 
+    # ---- Hard-zero cases ----
+    # No mechanical way to track the pass cleanly.
     if truly_infeasible:
         score = 0.0
-    else:
+    # Sat in Earth's shadow throughout — invisible to the camera.
+    elif not any_sunlit:
+        score = 0.0
+    # Sun above horizon at every tick — full daylight, sat washed out.
+    elif sun_alt_min_deg > 0:
+        score = 0.0
+    elif peak_vis_mag is not None:
+        # ==== Night-visible (sun < -3°, sat sunlit) ====
+        # Base = mechanical-feasibility + tracking quality + mid-sky
+        # + duration. Then add magnitude / pin bonuses.
         score = 100.0
-    if cable_wrap_only:
-        score -= 20.0   # fixable: penalty but not zeroed
-
-    score -= 20.0 * az_rms
-    score -= 20.0 * el_rms
-    score -= abs(peak_el_deg - 60.0) * 0.2
-    score += min(duration_s / 60.0, 10.0) * 1.0
-
-    # Visibility multiplier — applied BEFORE the pin so shadowed
-    # passes always rank BELOW visible passes, even when pinned.
-    if peak_vis_mag is None:
-        # Pass is invisible (sat in shadow or sky too bright). Camera
-        # cannot photograph it; tracking is mechanically possible but
-        # useless. Heavy penalty.
-        score *= 0.1
-    else:
-        # Bonus for naked-eye-bright passes.
-        if peak_vis_mag < 2.0:
+        if cable_wrap_only:
+            score -= 20.0
+        score -= 20.0 * az_rms
+        score -= 20.0 * el_rms
+        score -= abs(peak_el_deg - 60.0) * 0.2
+        score += min(duration_s / 60.0, 10.0) * 1.0
+        # Magnitude bonus — brighter is better (more negative mag).
+        if peak_vis_mag <= 2.0:
             score += 10.0
-        if peak_vis_mag < -1.0:
+        if peak_vis_mag <= -1.0:
             score += 20.0
+        if peak_vis_mag <= -3.0:
+            score += 30.0
+        # Slew-rate penalty: fast passes saturate the controller.
+        peak_rate = max(pre.peak_v_az_degs, pre.peak_v_el_degs)
+        if peak_rate > 5.5:
+            score -= 30.0  # near plant cap
+        elif peak_rate > 4.0:
+            score -= 10.0
+    elif peak_mag is not None and -3.0 < sun_alt_min_deg < 0.0:
+        # ==== Twilight (sun 0° to -3°, sat sunlit) ====
+        # Magnitude dominates — only naked-eye sats stand a chance
+        # against a still-bright sky. Sun depth gates the multiplier:
+        # at sun_alt = 0 the sky is too bright (factor 0); at -3 we
+        # treat it as nearly full visibility (factor 1).
+        if peak_mag > 4.0:
+            score = 0.0   # too faint to break through twilight
+        else:
+            # Magnitude bonus: -2 → +35, 0 → +20, +3 → +5
+            mag_bonus = max(0.0, 20.0 - 5.0 * peak_mag)
+            tracking_quality = 100.0 - 20.0 * az_rms - 20.0 * el_rms
+            tracking_quality -= abs(peak_el_deg - 60.0) * 0.2
+            tracking_quality += min(duration_s / 60.0, 10.0)
+            if cable_wrap_only:
+                tracking_quality -= 20.0
+            depth_factor = min(1.0, max(0.0, -sun_alt_min_deg / 3.0))
+            score = (tracking_quality + mag_bonus) * depth_factor
+    else:
+        # Sunlit but in deep daylight (sun_alt_min_deg <= -3 is visible;
+        # > 0 is daytime; the only remainder is mid-day passes where
+        # peak_mag wasn't computed for some reason).
+        score = 0.0
 
-    # Tiangong / CSS pin — applies ONLY when visible. A shadowed
-    # Tianhe pass is unphotographable and shouldn't outrank a visible
-    # ISS pass just because of its name.
+    score = max(0.0, score)
+
+    # Tiangong / CSS pin — applies ONLY when fully visible.
     tle_pinned = "TIANHE" in name.upper() or "CSS" in name.upper() or "TIANGONG" in name.upper()
     if tle_pinned and peak_vis_mag is not None:
         score += 1000.0

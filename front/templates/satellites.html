@@ -177,7 +177,10 @@
                             return (p.peak_visible_mag <= 2 ? '<b>' : '')
                                 + (p.peak_visible_mag).toFixed(1)
                                 + (p.peak_visible_mag <= 2 ? '</b>' : '')
-                                + (p.visible_seconds ? ' <small class="text-muted">(' + Math.round(p.visible_seconds) + 's)</small>' : '');
+                                + (p.visible_seconds
+                                    ? ' <small class="text-muted" title="duration (wall-clock seconds) when sat is sunlit AND sky is dark enough — may be less than full pass duration if pass crosses the twilight boundary">('
+                                        + Math.round(p.visible_seconds) + 's)</small>'
+                                    : '');
                         }
                         // Twilight: sun has set (sun_alt < 0°) but isn't deep enough (< -3°).
                         // Sat is sunlit, mag is meaningful — show it as a hint.
