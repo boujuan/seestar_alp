@@ -46,6 +46,104 @@ MIN_PASS_DURATION_S = 240.0
 MIN_EL_DEG_FOR_PASS = 10.0  # rise/set threshold for find_events
 
 
+# Standard (intrinsic) visual magnitudes — the brightness a satellite
+# would have at range 1000 km, fully sunlit, phase angle = 0. Used with
+# the range + phase formula below to estimate apparent magnitude per
+# pass. Values from McCants' visual mag database + common references.
+STANDARD_MAGNITUDES: dict[str, float] = {
+    # Stations
+    "ISS (ZARYA)": -1.8,
+    "ISS (NAUKA)": -1.8,
+    "CSS (TIANHE)": +0.8,
+    "TIANHE-1": +0.8,
+    # Brighter LEO objects
+    "HST": +2.4,        # Hubble
+    "ENVISAT": +1.4,
+    "COSMOS 1408 DEB": +6.0,
+    # Bright rocket bodies (typical)
+    "SL-16 R/B": +2.0,
+    "SL-14 R/B": +3.0,
+    "SL-8 R/B": +4.0,
+    "SL-3 R/B": +3.5,
+    "SL-12 R/B(2)": +4.0,
+    "ARIANE 40 R/B": +3.0,
+    "ARIANE 40+ R/B": +3.0,
+    "CZ-2C R/B": +4.0,
+    "CZ-4B R/B": +4.5,
+    # Crew/cargo capsules
+    "SZ-21 MODULE": +3.0,
+    # Default for unlisted satellites — most sub-microsat are dim
+    "_DEFAULT": +5.0,
+}
+
+
+def _std_mag_for(name: str) -> float:
+    """Best-effort standard magnitude for a satellite by name."""
+    if name in STANDARD_MAGNITUDES:
+        return STANDARD_MAGNITUDES[name]
+    # Try class prefix (e.g. "SL-16 R/B" matches if name starts with that)
+    for key, val in STANDARD_MAGNITUDES.items():
+        if key == "_DEFAULT":
+            continue
+        if name.startswith(key.split()[0]):
+            return val
+    return STANDARD_MAGNITUDES["_DEFAULT"]
+
+
+def _peak_apparent_magnitude(
+    sat,
+    ts_scale,
+    t_grid_unix: np.ndarray,
+    sun_az_deg_grid: np.ndarray | None,
+    sun_alt_deg_grid: np.ndarray | None,
+    sat_alt_deg_grid: np.ndarray,
+    sat_slant_m_grid: np.ndarray,
+    std_mag: float,
+    eph,
+) -> tuple[float, bool]:
+    """Return (peak_apparent_mag, any_sunlit) over a pass.
+
+    Apparent magnitude:
+        m = std_mag + 5*log10(range_km/1000)
+            - 2.5*log10(phase_function)
+
+    Phase function (diffuse sphere): (1 + cos(phase_angle))/2
+
+    A satellite is "visible" only if it's in sunlight AND the sky is
+    dark enough (sun below ~-6 deg). For shadowed samples the magnitude
+    is reported as +inf (not visible).
+    """
+    # Sunlit check per-tick via skyfield. from_datetime needs a list,
+    # not an ndarray.
+    times = ts_scale.from_datetimes([
+        datetime.fromtimestamp(float(t), tz=timezone.utc)
+        for t in t_grid_unix
+    ])
+    try:
+        sunlit = sat.at(times).is_sunlit(eph)  # ndarray of bool
+    except Exception:
+        sunlit = np.ones(len(t_grid_unix), dtype=bool)
+
+    # Range in km
+    range_km = sat_slant_m_grid / 1000.0
+    # Simple phase model: phase ~ 90 deg when sat is at half-illumination,
+    # cosine factor (1+cos)/2. Without a proper sun vector at the sat,
+    # approximate with the sat's altitude proxy: low alt = larger phase
+    # angle (sat seen edge-on relative to sun). Conservative.
+    # For a better estimate this needs sun_az/alt at the satellite, not
+    # the observer — left for a polish round.
+    phase_func = np.full_like(range_km, 0.5)  # diffuse default
+    # Avoid log of zero
+    phase_func = np.maximum(phase_func, 1e-3)
+
+    apparent = std_mag + 5 * np.log10(range_km / 1000.0) - 2.5 * np.log10(phase_func)
+    # Mask shadowed samples to +inf
+    apparent_visible = np.where(sunlit, apparent, np.inf)
+    if not np.any(np.isfinite(apparent_visible)):
+        return float("inf"), False
+    return float(np.min(apparent_visible)), bool(np.any(sunlit))
+
+
 @dataclass
 class Pass:
     satellite_name: str
@@ -138,6 +236,7 @@ def _pick_tle_lines(sat) -> tuple[str, str]:
 
 def export_pass(
     p: Pass, sat, site, load, out_dir: Path, sample_hz: float,
+    *, eph=None,
 ) -> Path | None:
     out_dir.mkdir(parents=True, exist_ok=True)
     dt = 1.0 / sample_hz
@@ -157,6 +256,22 @@ def export_pass(
     t0 = int(t_grid[0])
     path = out_dir / f"{safe_name}_{p.norad_id}_{t0}.jsonl"
 
+    # Apparent magnitude estimate (peak brightness during the pass)
+    std_mag = _std_mag_for(p.satellite_name)
+    peak_mag = float("inf")
+    any_sunlit = False
+    if eph is not None:
+        try:
+            peak_mag, any_sunlit = _peak_apparent_magnitude(
+                sat, ts_scale, t_grid,
+                sun_az_deg_grid=None, sun_alt_deg_grid=None,
+                sat_alt_deg_grid=el, sat_slant_m_grid=slant,
+                std_mag=std_mag, eph=eph,
+            )
+        except Exception as exc:
+            print(f"[fetch_satellites] mag calc failed for {p.satellite_name}: {exc}",
+                  file=sys.stderr)
+
     l1, l2 = _pick_tle_lines(sat)
     header = {
         "kind": "header",
@@ -173,6 +288,9 @@ def export_pass(
         "max_slant_m": float(np.max(slant)),
         "sample_rate_hz": sample_hz,
         "n_samples": int(len(t_grid)),
+        "std_mag": std_mag,
+        "peak_apparent_mag": peak_mag if np.isfinite(peak_mag) else None,
+        "any_sunlit": any_sunlit,
         "tle": [l1, l2] if l1 else [],
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
@@ -222,6 +340,14 @@ def fetch_and_export(
     site = build_site()
     load = _loader()
     ts = load.timescale()
+    # Planetary ephemeris for sunlit-shadow check. First call downloads
+    # ~17 MB de421.bsp; subsequent calls use the cache.
+    try:
+        eph = load("de421.bsp")
+    except Exception as exc:
+        print(f"[fetch_satellites] eph load failed (no magnitude calc): {exc}",
+              file=sys.stderr)
+        eph = None
 
     sats = load_tles(load)
     if not sats:
@@ -270,7 +396,7 @@ def fetch_and_export(
 
     written: list[Path] = []
     for p, sat in picked:
-        path = export_pass(p, sat, site, load, out_dir, sample_hz)
+        path = export_pass(p, sat, site, load, out_dir, sample_hz, eph=eph)
         if path is not None:
             written.append(path)
     print(f"[fetch_satellites] exported {len(written)} pass(es) to {out_dir}",

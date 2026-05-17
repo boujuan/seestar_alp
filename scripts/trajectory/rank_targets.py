@@ -58,6 +58,8 @@ class TargetReport:
     score: float
     tle_pinned: bool
     notes: list[str]
+    peak_apparent_mag: float | None = None  # smaller = brighter; None if in shadow
+    any_sunlit: bool = True
 
     def summary(self) -> str:
         tag = "★" if self.tle_pinned else ("✓" if self.feasible else "✗")
@@ -116,6 +118,8 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
         )
 
     t_start, t_end = provider.valid_range()
+    peak_mag = header.get("peak_apparent_mag")
+    any_sunlit = bool(header.get("any_sunlit", True))
     return TargetReport(
         path=path, name=str(name),
         start_unix=float(t_start), end_unix=float(t_end),
@@ -134,6 +138,8 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
         score=score,
         tle_pinned=tle_pinned,
         notes=notes,
+        peak_apparent_mag=peak_mag,
+        any_sunlit=any_sunlit,
     )
 
 
@@ -194,6 +200,8 @@ def _report_to_dict(r: TargetReport) -> dict:
         "tle_pinned": r.tle_pinned,
         "score": r.score,
         "notes": r.notes,
+        "peak_apparent_mag": r.peak_apparent_mag,
+        "any_sunlit": r.any_sunlit,
     }
 
 

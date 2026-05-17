@@ -74,6 +74,7 @@
                 +  '<th>Duration</th>'
                 +  '<th>Peak el</th>'
                 +  '<th>Peak rate</th>'
+                +  '<th>Mag</th>'
                 +  '<th>Score</th>'
                 +  '<th>Notes</th>'
                 +  '<th></th>'
@@ -98,10 +99,16 @@
                      +  '<td>' + Math.round(p.duration_s) + ' s</td>'
                      +  '<td class="' + elClass + '">' + p.peak_el_deg.toFixed(1) + '&deg;</td>'
                      +  '<td class="' + rateClass + '">' + rate.toFixed(2) + ' &deg;/s</td>'
+                     +  '<td>' + (p.peak_apparent_mag != null
+                            ? (p.peak_apparent_mag <= 2 ? '<b>' : '')
+                              + (p.peak_apparent_mag).toFixed(1)
+                              + (p.peak_apparent_mag <= 2 ? '</b>' : '')
+                            : '<span class="text-muted" title="in Earth shadow during pass">--</span>') + '</td>'
                      +  '<td>' + p.score.toFixed(0) + '</td>'
                      +  '<td>' + notesHtml + '</td>'
-                     +  '<td><button type="button" class="btn btn-sm btn-outline-primary" '
-                     +    'disabled title="Phase 2 — not yet wired up">Track</button></td>'
+                     +  '<td><button type="button" class="btn btn-sm btn-outline-secondary" '
+                     +    'disabled title="Not yet wired up — backend handoff in Phase 2" '
+                     +    'style="opacity:0.45; cursor:not-allowed;">Track (soon)</button></td>'
                      +  '</tr>';
             });
             html += '</tbody></table>';
