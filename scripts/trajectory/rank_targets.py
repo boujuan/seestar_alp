@@ -62,6 +62,7 @@ class TargetReport:
     peak_visible_mag: float | None = None   # bright AND sky dark enough; None if not visible
     visible_seconds: float = 0.0
     any_sunlit: bool = True
+    cable_wrap_only: bool = False  # cable-wrap fails but everything else OK (pre-positioning fixes)
 
     def summary(self) -> str:
         tag = "★" if self.tle_pinned else ("✓" if self.feasible else "✗")
@@ -103,20 +104,33 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
     visible_seconds = float(header.get("visible_seconds", 0.0))
     any_sunlit = bool(header.get("any_sunlit", True))
 
-    # Score: feasibility + tracking quality + mid-sky bonus + duration.
-    # Visibility (sat sunlit AND observer sky dark) is the LARGEST
-    # qualitative factor — a shadowed pass is unphotographable.
-    if pre.feasible and sim.az_sat_count == 0 and sim.el_sat_count == 0:
-        score = 100.0
-    else:
+    # Distinguish FIXABLE infeasibility (cable-wrap — can be solved by
+    # pre-positioning the mount before the track starts) from TRULY
+    # broken passes (el-limit, FF saturation, replay saturation). The
+    # cable-wrap-only case is shown as a warning in the UI and still
+    # scored reasonably; the truly-broken case is zeroed.
+    truly_infeasible = bool(
+        pre.el_limit_violations
+        or pre.v_saturation_ticks
+        or sim.az_sat_count
+        or sim.el_sat_count
+    )
+    cable_wrap_only = bool(pre.cable_wrap_violations) and not truly_infeasible
+
+    if truly_infeasible:
         score = 0.0
+    else:
+        score = 100.0
+    if cable_wrap_only:
+        score -= 20.0   # fixable: penalty but not zeroed
+
     score -= 20.0 * az_rms
     score -= 20.0 * el_rms
     score -= abs(peak_el_deg - 60.0) * 0.2
     score += min(duration_s / 60.0, 10.0) * 1.0
 
     # Visibility multiplier — applied BEFORE the pin so shadowed
-    # passes still rank below visible ones even when they are pinned.
+    # passes always rank BELOW visible passes, even when pinned.
     if peak_vis_mag is None:
         # Pass is invisible (sat in shadow or sky too bright). Camera
         # cannot photograph it; tracking is mechanically possible but
@@ -129,13 +143,12 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
         if peak_vis_mag < -1.0:
             score += 20.0
 
-    # Tiangong / CSS pin — still applies but reduced when shadowed.
+    # Tiangong / CSS pin — applies ONLY when visible. A shadowed
+    # Tianhe pass is unphotographable and shouldn't outrank a visible
+    # ISS pass just because of its name.
     tle_pinned = "TIANHE" in name.upper() or "CSS" in name.upper() or "TIANGONG" in name.upper()
-    if tle_pinned:
-        if peak_vis_mag is None:
-            score += 100.0   # still surface it, but don't dominate the list
-        else:
-            score += 1000.0
+    if tle_pinned and peak_vis_mag is not None:
+        score += 1000.0
 
     notes = list(pre.notes)
     if sim.az_sat_count or sim.el_sat_count:
@@ -166,6 +179,7 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
         peak_visible_mag=peak_vis_mag,
         visible_seconds=visible_seconds,
         any_sunlit=any_sunlit,
+        cable_wrap_only=cable_wrap_only,
     )
 
 
@@ -230,6 +244,7 @@ def _report_to_dict(r: TargetReport) -> dict:
         "peak_visible_mag": r.peak_visible_mag,
         "visible_seconds": r.visible_seconds,
         "any_sunlit": r.any_sunlit,
+        "cable_wrap_only": r.cable_wrap_only,
     }
 
 

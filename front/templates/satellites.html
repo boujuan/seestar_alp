@@ -149,7 +149,15 @@
             var notesHtml = (p.notes || []).map(function (n) {
                 return '<span class="badge bg-warning text-dark me-1">' + escapeHtml(n) + '</span>';
             }).join("");
-            if (!p.feasible) notesHtml = '<span class="badge bg-danger">infeasible</span> ' + notesHtml;
+            if (!p.feasible) {
+                // Distinguish fixable (cable-wrap only — pre-position the
+                // mount before track) from real infeasibility.
+                if (p.cable_wrap_only) {
+                    notesHtml = '<span class="badge bg-warning text-dark" title="Cable-wrap range will be exceeded from cum_az=0 start. Pre-positioning the mount before track will fix this.">cable wrap</span> ' + notesHtml;
+                } else {
+                    notesHtml = '<span class="badge bg-danger">infeasible</span> ' + notesHtml;
+                }
+            }
             var rowKey = p.path;
             var expanded = _expandedKeys.has(rowKey);
             html += '<tr class="sat-row' + imminent + live + pinClass + '" '
@@ -163,14 +171,26 @@
                  +  '<td>' + Math.round(p.duration_s) + ' s</td>'
                  +  '<td class="' + elClass + '">' + p.peak_el_deg.toFixed(1) + '&deg;</td>'
                  +  '<td class="' + rateClass + '">' + rate.toFixed(2) + ' &deg;/s</td>'
-                 +  '<td>' + (p.peak_visible_mag != null
-                        ? (p.peak_visible_mag <= 2 ? '<b>' : '')
-                          + (p.peak_visible_mag).toFixed(1)
-                          + (p.peak_visible_mag <= 2 ? '</b>' : '')
-                          + (p.visible_seconds ? ' <small class="text-muted">(' + Math.round(p.visible_seconds) + 's)</small>' : '')
-                        : (p.any_sunlit
-                           ? '<span class="text-muted" title="sat is sunlit but observer sky is still too bright (sun above -3°, i.e. before deep civil twilight)">twilight</span>'
-                           : '<span class="text-muted" title="sat in Earth shadow throughout pass">shadow</span>')) + '</td>'
+                 +  '<td>' + (function () {
+                        // Visible: bold mag + visible window
+                        if (p.peak_visible_mag != null) {
+                            return (p.peak_visible_mag <= 2 ? '<b>' : '')
+                                + (p.peak_visible_mag).toFixed(1)
+                                + (p.peak_visible_mag <= 2 ? '</b>' : '')
+                                + (p.visible_seconds ? ' <small class="text-muted">(' + Math.round(p.visible_seconds) + 's)</small>' : '');
+                        }
+                        // Twilight: sat is sunlit so the magnitude IS valid — sky just isn't dark enough.
+                        // Show it muted so user knows the brightness in case they want to try anyway.
+                        if (p.any_sunlit && p.peak_apparent_mag != null) {
+                            return '<span class="text-muted" title="apparent mag if sky were dark — currently sun is between 0° and -3° (twilight)">'
+                                + p.peak_apparent_mag.toFixed(1)
+                                + ' <small>(twilight)</small></span>';
+                        }
+                        if (p.any_sunlit) {
+                            return '<span class="text-muted" title="sat sunlit but sun above 0° (daytime)">daytime</span>';
+                        }
+                        return '<span class="text-muted" title="sat in Earth shadow throughout pass">shadow</span>';
+                    })() + '</td>'
                  +  '<td>' + p.score.toFixed(0) + '</td>'
                  +  '<td>' + notesHtml + '</td>'
                  +  '<td><button type="button" class="btn btn-sm btn-outline-primary" '
