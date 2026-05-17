@@ -62,6 +62,7 @@ class TargetReport:
     peak_visible_mag: float | None = None   # bright AND sky dark enough; None if not visible
     visible_seconds: float = 0.0
     any_sunlit: bool = True
+    sun_alt_min_deg: float = 0.0  # darkest sun altitude during the pass (negative = below horizon)
     cable_wrap_only: bool = False  # cable-wrap fails but everything else OK (pre-positioning fixes)
 
     def summary(self) -> str:
@@ -103,6 +104,7 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
     peak_vis_mag = header.get("peak_visible_mag")
     visible_seconds = float(header.get("visible_seconds", 0.0))
     any_sunlit = bool(header.get("any_sunlit", True))
+    sun_alt_min_deg = float(header.get("sun_alt_min_deg", 0.0))
 
     # Distinguish FIXABLE infeasibility (cable-wrap — can be solved by
     # pre-positioning the mount before the track starts) from TRULY
@@ -179,6 +181,7 @@ def _evaluate(path: Path, mount_frame: MountFrame) -> TargetReport:
         peak_visible_mag=peak_vis_mag,
         visible_seconds=visible_seconds,
         any_sunlit=any_sunlit,
+        sun_alt_min_deg=sun_alt_min_deg,
         cable_wrap_only=cable_wrap_only,
     )
 
@@ -244,6 +247,7 @@ def _report_to_dict(r: TargetReport) -> dict:
         "peak_visible_mag": r.peak_visible_mag,
         "visible_seconds": r.visible_seconds,
         "any_sunlit": r.any_sunlit,
+        "sun_alt_min_deg": r.sun_alt_min_deg,
         "cable_wrap_only": r.cable_wrap_only,
     }
 

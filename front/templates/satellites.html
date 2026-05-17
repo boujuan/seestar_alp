@@ -172,22 +172,24 @@
                  +  '<td class="' + elClass + '">' + p.peak_el_deg.toFixed(1) + '&deg;</td>'
                  +  '<td class="' + rateClass + '">' + rate.toFixed(2) + ' &deg;/s</td>'
                  +  '<td>' + (function () {
-                        // Visible: bold mag + visible window
+                        // Bright + sky dark enough (sun < -3° = real visibility)
                         if (p.peak_visible_mag != null) {
                             return (p.peak_visible_mag <= 2 ? '<b>' : '')
                                 + (p.peak_visible_mag).toFixed(1)
                                 + (p.peak_visible_mag <= 2 ? '</b>' : '')
                                 + (p.visible_seconds ? ' <small class="text-muted">(' + Math.round(p.visible_seconds) + 's)</small>' : '');
                         }
-                        // Twilight: sat is sunlit so the magnitude IS valid — sky just isn't dark enough.
-                        // Show it muted so user knows the brightness in case they want to try anyway.
-                        if (p.any_sunlit && p.peak_apparent_mag != null) {
-                            return '<span class="text-muted" title="apparent mag if sky were dark — currently sun is between 0° and -3° (twilight)">'
+                        // Twilight: sun has set (sun_alt < 0°) but isn't deep enough (< -3°).
+                        // Sat is sunlit, mag is meaningful — show it as a hint.
+                        if (p.any_sunlit && p.peak_apparent_mag != null
+                            && p.sun_alt_min_deg != null && p.sun_alt_min_deg < 0) {
+                            return '<span class="text-muted" title="apparent mag if sky were darker — sun is below horizon but above -3° (twilight)">'
                                 + p.peak_apparent_mag.toFixed(1)
                                 + ' <small>(twilight)</small></span>';
                         }
+                        // Sun still above horizon at any point during pass = daytime
                         if (p.any_sunlit) {
-                            return '<span class="text-muted" title="sat sunlit but sun above 0° (daytime)">daytime</span>';
+                            return '<span class="text-muted" title="sun above horizon throughout pass — daytime">daytime</span>';
                         }
                         return '<span class="text-muted" title="sat in Earth shadow throughout pass">shadow</span>';
                     })() + '</td>'
